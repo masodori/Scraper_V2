@@ -1,0 +1,204 @@
+{
+  "name": "gibsondunn.com_20250611T0621",
+  "description": "Interactive template for www.gibsondunn.com",
+  "version": "1.0",
+  "created_at": "2025-06-11T06:21:56.596000+00:00",
+  "url": "https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/",
+  "user_agent": null,
+  "headless": true,
+  "wait_timeout": 30.0,
+  "page_load_timeout": 60.0,
+  "cookies": [
+    {
+      "name": "Path",
+      "value": "/",
+      "domain": "www.gibsondunn.com",
+      "path": "/wp-json/wcc/v1",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "Path",
+      "value": "/",
+      "domain": "www.gibsondunn.com",
+      "path": "/people",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "__cf_bm",
+      "value": "2MgDRQXmUJn1BfRy5zsWo_lKAV_mXm1WtLrdyyBvi5A-1749622800-1.0.1.1-m0CdKwviRdtXikQiCyxeHZLoa7RxKPznXCGmOH1TTANviLEIPKrxjNuc5ssba5S5_O0FCMQZsJxzQmq78lSSvuF_cLMwD1wTR8HA.boqb00",
+      "domain": ".gibsondunn.com",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "Path",
+      "value": "/",
+      "domain": "www.gibsondunn.com",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "PHPSESSID",
+      "value": "d0hbo0u49i9efo97fgg6rs24gp",
+      "domain": "www.gibsondunn.com",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "cf_clearance",
+      "value": "aX_H4vJimIN7aUGX9WYKkjb9HWccZH.klBchoKD3HCs-1749622802-1.2.1.1-6oykUSEKTFMSKSV6CAfDpwLMo8JLeoQIsVI9NR8ziZ7qqjmHsmBOl2NwX_V7.MOGN2qVMcREUYYi7hy7TSZvkReOYObAldc.rVZGkv9WgFdfyVAJn6s71D786CUZZIBw.n_nDGV_fOFyEY9YQAfJAJdAfOrRjIfyUCH8vD4lxUtW8lMcsbdVcjb4P1K9z64C8kqUf1.mWvNRiVzKIk9PsOu4r_9eYbcPnFwC_qXWdgsBsKWtBhETVpWtHuL73G0nwiZ7ApTc3v_BXTvHbTEcyow2KPThwL3kbrVR.9.HiLS5aEo4FCpMvJKdfQzcUniwa6wMtv_N72jQZaZGNfsQHJQd6DBlZCtUX44VVih4AMs",
+      "domain": ".gibsondunn.com",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "wt_consent",
+      "value": "consentid:dzRpSFpyR3ZMSDhySU9wT05EV01CMWFkU0ZVcDFyTUw,consent:yes,action:yes,necessary:yes,functional:yes,analytics:yes,performance:yes,advertisement:yes,others:yes,consent_time:1749622802466",
+      "domain": "www.gibsondunn.com",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false,
+      "sameSite": "Strict"
+    },
+    {
+      "name": "_ga_NK6SF84HP0",
+      "value": "GS2.1.s1749622803$o1$g0$t1749622803$j60$l0$h0",
+      "domain": ".gibsondunn.com",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga",
+      "value": "GA1.1.1373561098.1749622804",
+      "domain": ".gibsondunn.com",
+      "path": "/",
+      "secure": false,
+      "httpOnly": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "intEmailHistoryId",
+      "value": "-635559",
+      "domain": ".gibsondunn.vuture.net",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None"
+    }
+  ],
+  "elements": [
+    {
+      "label": "main",
+      "selector": "xpath:/html/body/div[4]/div/main/div/div[5]/div[1]",
+      "selector_type": "xpath",
+      "element_type": "container",
+      "attribute_name": null,
+      "is_multiple": true,
+      "is_required": true,
+      "is_container": true,
+      "use_find_similar": false,
+      "sub_elements": [
+        {
+          "label": "name",
+          "selector": "xpath:.//strong[1]",
+          "element_type": "text",
+          "attribute_name": null,
+          "is_required": true
+        },
+        {
+          "label": "position",
+          "selector": "xpath:.//span[1]",
+          "element_type": "text",
+          "attribute_name": null,
+          "is_required": true
+        },
+        {
+          "label": "sector",
+          "selector": "xpath:.//span[2]",
+          "element_type": "text",
+          "attribute_name": null,
+          "is_required": true
+        },
+        {
+          "label": "email",
+          "selector": "xpath:.//a[contains(@href, 'mailto:')]",
+          "element_type": "link",
+          "attribute_name": null,
+          "is_required": true
+        },
+        {
+          "label": "phone",
+          "selector": "xpath:.//a[contains(@href, 'tel:')]",
+          "element_type": "link",
+          "attribute_name": null,
+          "is_required": true
+        }
+      ],
+      "follow_links": false,
+      "subpage_elements": []
+    },
+    {
+      "label": "sublink",
+      "selector": "xpath://*[contains(@class, 'wp-block-column')]",
+      "selector_type": "xpath",
+      "element_type": "container",
+      "attribute_name": null,
+      "is_multiple": true,
+      "is_required": true,
+      "is_container": true,
+      "use_find_similar": false,
+      "sub_elements": [
+        {
+          "label": "education",
+          "selector": "xpath:.//li[1]",
+          "element_type": "text",
+          "attribute_name": null,
+          "is_required": true
+        },
+        {
+          "label": "creds",
+          "selector": "xpath:.//*[contains(text(), 'Egypt - Egypt Bar')]",
+          "element_type": "text",
+          "attribute_name": null,
+          "is_required": true
+        }
+      ],
+      "follow_links": false,
+      "subpage_elements": []
+    }
+  ],
+  "actions": [
+    {
+      "label": "link",
+      "selector": "xpath://a[@href='https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/']",
+      "action_type": "click",
+      "wait_after": 2.0,
+      "target_url": "https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/",
+      "repeat_until_missing": false,
+      "repeat_until_no_change": false,
+      "max_repeats": null
+    }
+  ],
+  "filters": [],
+  "pagination": null,
+  "enable_subpage_scraping": false,
+  "subpage_url_pattern": null,
+  "max_subpages": null,
+  "stealth_mode": true,
+  "random_delays": true,
+  "output_format": "json"
+}

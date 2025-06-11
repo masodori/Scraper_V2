@@ -1,0 +1,13 @@
+# Core web scraping and browser automation
+scrapling
+playwright
+
+# Data processing and export
+pandas
+openpyxl
+
+# Data validation and models
+pydantic
+
+# Testing
+pytest
