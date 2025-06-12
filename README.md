@@ -254,7 +254,6 @@ Scraper_V2/
 │   ├── test_models.py                   # Template model tests
 │   └── test_scrapling_runner.py         # Scraping engine tests
 ├── 📄 requirements.txt                  # Python dependencies
-├── 📄 CLAUDE.md                         # Claude Code guidance & project rules
 ├── 📄 README.md                         # This file - project documentation
 ├── 📄 quick_test.py                     # Quick testing script
 ├── 📄 test_*.py                         # Additional test scripts
