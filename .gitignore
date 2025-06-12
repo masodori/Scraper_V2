@@ -133,3 +133,8 @@ src/**/*.backup
 templates/backup_*
 *template*.json
 template.json
+# Template Files
+**/template*.json
+**/templates/*.json
+template.json
+templates/**/*.json
