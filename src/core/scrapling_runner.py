@@ -16,16 +16,194 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scrapling.fetchers import PlayWrightFetcher, StealthyFetcher
 from scrapling import Adaptor
-from colorama import Fore
 
 from ..models.scraping_template import ScrapingTemplate, ScrapingResult, ElementSelector, NavigationAction, CookieData
 
 logger = logging.getLogger(__name__)
+
+
+class ScrapingContext:
+    """
+    Shared context for all scraping components.
+    Holds common state and provides unified access to resources.
+    """
+    
+    def __init__(self, template: ScrapingTemplate):
+        self.template = template
+        self.fetcher = None
+        self.current_page = None
+        self.session_logger = logging.getLogger(f"scrapling_runner.{template.name}")
+
+
+class TemplateAnalyzer:
+    """
+    Analyzes template characteristics and determines scraping strategies.
+    """
+    
+    def __init__(self, context: ScrapingContext):
+        self.context = context
+    
+    def looks_like_directory_template(self) -> bool:
+        """
+        Determine if template appears to be designed for directory/listing pages.
+        Enhanced detection for lawyer directory patterns.
+        
+        Returns:
+            True if template has directory-like characteristics
+        """
+        directory_indicators = [
+            # Container-based extraction suggests multiple items
+            any(hasattr(elem, 'is_container') and elem.is_container for elem in self.context.template.elements),
+            # Multiple elements suggests listing
+            any(elem.is_multiple for elem in self.context.template.elements),
+            # Directory-like selectors
+            any('people' in elem.selector.lower() or 'list' in elem.selector.lower() 
+                or 'grid' in elem.selector.lower() for elem in self.context.template.elements),
+            # Profile link extraction suggests directory
+            any(hasattr(elem, 'sub_elements') and elem.sub_elements and 
+                any('link' in sub.get('label', '').lower() or 'profile' in sub.get('label', '').lower() 
+                    or 'email' in sub.get('label', '').lower()
+                    for sub in elem.sub_elements if isinstance(sub, dict))
+                for elem in self.context.template.elements if hasattr(elem, 'sub_elements')),
+            # Actions that navigate to profiles
+            any('link' in action.label.lower() and '/lawyer/' in getattr(action, 'target_url', '')
+                for action in self.context.template.actions if hasattr(self.context.template, 'actions')),
+            # Profile-like sub-element patterns (name, title, email combinations suggest directory)
+            any(hasattr(elem, 'sub_elements') and elem.sub_elements and
+                len([sub for sub in elem.sub_elements if isinstance(sub, dict) and 
+                     any(keyword in sub.get('label', '').lower() 
+                         for keyword in ['name', 'title', 'position', 'email', 'phone'])]) >= 2
+                for elem in self.context.template.elements if hasattr(elem, 'sub_elements'))
+        ]
+        
+        return any(directory_indicators)
+    
+    def template_needs_subpage_data(self) -> bool:
+        """
+        Check if template has elements that require subpage navigation.
+        
+        Returns:
+            True if template has subpage elements or education/credentials elements
+        """
+        # Check for elements that are typically found on individual profile pages
+        subpage_indicators = [
+            # Elements with subpage_elements defined
+            any(hasattr(elem, 'subpage_elements') and elem.subpage_elements 
+                for elem in self.context.template.elements),
+            # Education/credentials elements (typically on individual pages)
+            any(hasattr(elem, 'sub_elements') and elem.sub_elements and
+                any('education' in sub.get('label', '').lower() or 'cred' in sub.get('label', '').lower()
+                    for sub in elem.sub_elements if isinstance(sub, dict))
+                for elem in self.context.template.elements if hasattr(elem, 'sub_elements')),
+            # Multiple containers with different purposes (main + subpage data)
+            len([elem for elem in self.context.template.elements if hasattr(elem, 'is_container') and elem.is_container]) >= 2,
+            # Actions that navigate to specific pages
+            any('link' in action.label.lower() and '/lawyer/' in getattr(action, 'target_url', '')
+                for action in self.context.template.actions if hasattr(self.context.template, 'actions'))
+        ]
+        
+        return any(subpage_indicators)
+    
+    def is_subpage_container(self, element_config: ElementSelector) -> bool:
+        """
+        Check if a container is meant to extract data from individual subpages.
+        
+        Args:
+            element_config: ElementSelector configuration
+            
+        Returns:
+            True if container should extract data from subpages
+        """
+        subpage_indicators = [
+            # Container label suggests subpage data
+            any(keyword in element_config.label.lower() 
+                for keyword in ['subpage', 'sublink', 'subcon', 'education', 'credential', 'experience', 'bio', 'profile']),
+            # Sub-elements that are typically on individual pages
+            hasattr(element_config, 'sub_elements') and element_config.sub_elements and
+            any(keyword in sub.get('label', '').lower() if isinstance(sub, dict) else getattr(sub, 'label', '').lower()
+                for keyword in ['education', 'credential', 'admission', 'bar', 'experience', 'bio', 'creds']
+                for sub in element_config.sub_elements),
+            # Template has follow_links enabled for this container
+            getattr(element_config, 'follow_links', False)
+        ]
+        
+        is_subpage = any(subpage_indicators)
+        self.context.session_logger.debug(f"Subpage container check for '{element_config.label}': {is_subpage} (indicators: {subpage_indicators})")
+        return is_subpage
+
+
+class SelectorEngine:
+    """
+    Handles selector enhancement, fallback generation, and CSS/XPath conversion.
+    """
+    
+    def __init__(self, context: ScrapingContext):
+        self.context = context
+    
+    def map_generic_selector(self, sub_element: dict, context: str = "directory") -> str:
+        """
+        Map generic selectors to meaningful ones based on label and context.
+        
+        Args:
+            sub_element: Sub-element configuration dict
+            context: Context type ("directory" or "profile")
+            
+        Returns:
+            Enhanced selector string
+        """
+        label = sub_element.get('label', '').lower()
+        original_selector = sub_element.get('selector', '')
+        
+        # Always preserve XPath selectors - they are position-specific and already optimized
+        if original_selector.startswith('xpath:'):
+            return original_selector
+        
+        # If selector is already specific, keep it
+        if len(original_selector) > 10 and ('.' in original_selector or '#' in original_selector or '[' in original_selector):
+            return original_selector
+        
+        # Map generic selectors based on label
+        if 'name' in label:
+            if context == "directory":
+                return "p.name strong, h3, h2, .name, [class*='name'] strong, strong:first-of-type"
+            else:
+                return "h1, h2, .entry-title, .page-title, .lawyer-name, .attorney-name"
+                
+        elif any(keyword in label for keyword in ['title', 'position', 'job']):
+            if context == "directory":
+                return "p.title span, .title, .position, .job-title, [class*='title'], [class*='position']"
+            else:
+                return ".position, .title, .job-title, h2 + p, h1 + p"
+                
+        elif any(keyword in label for keyword in ['email', 'mail']):
+            return "a[href^='mailto:'], p.contact-details a[href^='mailto:'], .email, [class*='email'], a[href*='@']"
+            
+        elif 'phone' in label:
+            return "a[href^='tel:'], .phone, [class*='phone'], a[href*='tel']"
+            
+        elif any(keyword in label for keyword in ['sector', 'practice', 'area']):
+            if context == "directory":
+                return "p.contact-details span, .practice-area, .sector, [class*='practice'], [class*='sector'], p.title span:nth-child(2)"
+            else:
+                return ".practice-area, .capabilities, .focus-areas, a[href*='/practice/']"
+                
+        elif any(keyword in label for keyword in ['link', 'profile', 'url']) or 'email' in label:
+            if 'email' in label:
+                return "a[href^='mailto:'], .email, [class*='email'], a[href*='@']"
+            else:
+                return "a[href*='/lawyer/'], a[href*='/attorney/'], a[href*='/people/'], a[href*='/team/'], a"
+            
+        elif 'education' in label:
+            return ".education li, .is-style-no-bullets li, ul[class*='education'] li, .credentials li"
+            
+        elif any(keyword in label for keyword in ['cred', 'admission', 'bar']):
+            return ".admissions li, .bar li, .credentials li, .is-style-no-bullets li"
+        
+        # Default fallback - return original
+        return original_selector
 
 
 class ScraplingRunner:
@@ -135,13 +313,6 @@ class ScraplingRunner:
             # Process containers with follow_links for subpage navigation
             scraped_data = self._process_container_subpages(scraped_data)
             
-            # Check if we should use dual-engine mode for sublinks
-            if self._should_use_dual_engine_mode():
-                scraped_data = self._process_dual_engine_sublinks(scraped_data)
-            else:
-                # Fallback to original intelligent sublink processing
-                scraped_data = self._process_intelligent_sublinks(scraped_data)
-            
             # Merge directory and subpage data into unified format
             scraped_data = self._merge_directory_with_subpage_data(scraped_data)
             
@@ -155,8 +326,6 @@ class ScraplingRunner:
             }
             
             logger.info(f"Scraping completed successfully. Found {result.metadata['elements_found']} elements.")
-            # Only show major progress in console
-            print(f"{Fore.GREEN}▶ Extracted data from {result.metadata['elements_found']} element(s)")
             
         except Exception as e:
             error_msg = f"Scraping failed: {str(e)}"
@@ -172,7 +341,7 @@ class ScraplingRunner:
     def _looks_like_directory_template(self) -> bool:
         """
         Determine if template appears to be designed for directory/listing pages.
-        Enhanced detection for lawyer directory patterns.
+        Enhanced detection for directory patterns.
         
         Returns:
             True if template has directory-like characteristics
@@ -293,15 +462,6 @@ class ScraplingRunner:
         Returns:
             True if container should extract data from subpages
         """
-        # Primary indicator: follow_links must be explicitly enabled
-        follow_links_enabled = getattr(element_config, 'follow_links', False)
-        
-        # If follow_links is False, this is NOT a subpage container
-        if not follow_links_enabled:
-            logger.debug(f"Container '{element_config.label}' has follow_links=False, treating as same-page container")
-            return False
-        
-        # If follow_links is True, check for additional indicators to confirm
         subpage_indicators = [
             # Container label suggests subpage data
             any(keyword in element_config.label.lower() 
@@ -311,12 +471,12 @@ class ScraplingRunner:
             any(keyword in sub.get('label', '').lower() if isinstance(sub, dict) else getattr(sub, 'label', '').lower()
                 for keyword in ['education', 'credential', 'admission', 'bar', 'experience', 'bio', 'creds']
                 for sub in element_config.sub_elements),
-            # Follow links is enabled (already checked above)
-            True
+            # Template has follow_links enabled for this container
+            getattr(element_config, 'follow_links', False)
         ]
         
         is_subpage = any(subpage_indicators)
-        logger.debug(f"Subpage container check for '{element_config.label}': {is_subpage} (follow_links={follow_links_enabled}, indicators: {subpage_indicators})")
+        logger.debug(f"Subpage container check for '{element_config.label}': {is_subpage} (indicators: {subpage_indicators})")
         return is_subpage
     
     def _extract_subpage_container_data(self, profile_url: str, element_config: ElementSelector) -> Dict[str, Any]:
@@ -721,9 +881,7 @@ class ScraplingRunner:
             # Strategy 4: Structure-based selection
             lambda: self._try_structure_based_selection(element),
             # Strategy 5: Original selector as fallback
-            lambda: self._try_original_selector(element),
-            # Strategy 6: Fuzzy matching with variations
-            lambda: self._try_fuzzy_matching(element)
+            lambda: self._try_original_selector(element)
         ]
         
         for i, strategy in enumerate(strategies):
@@ -761,253 +919,22 @@ class ScraplingRunner:
         return []
     
     def _try_content_based_selection(self, element: ElementSelector) -> List:
-        """Try to find elements based on content patterns with intelligent matching."""
-        import re
-        
-        try:
-            # Enhanced pattern matching based on element label
-            label = element.label.lower()
-            
-            # Credential/Bar admission patterns
-            if any(keyword in label for keyword in ['cred', 'admission', 'bar', 'license']):
-                return self._find_credentials_intelligently()
-            
-            # Education patterns
-            elif 'education' in label:
-                return self._find_education_intelligently()
-                
-            # Position/Title patterns
-            elif any(keyword in label for keyword in ['position', 'title', 'role']):
-                return self._find_position_intelligently()
-                
-            # Contact patterns
-            elif any(keyword in label for keyword in ['email', 'phone', 'contact']):
-                return self._find_contact_intelligently(label)
-                
-            # Generic text pattern matching
-            else:
-                return self._find_generic_text_patterns(element)
-                
-        except Exception as e:
-            logger.debug(f"Content-based selection failed: {e}")
-            return []
-    
-    def _find_credentials_intelligently(self) -> List:
-        """Find credential/bar admission information using multiple intelligent strategies."""
-        strategies = [
-            # Strategy 1: Look for common bar patterns
-            lambda: self.current_page.xpath("//*[contains(text(), 'Bar') or contains(text(), 'bar')]"),
-            # Strategy 2: Look for state/country - credential patterns  
-            lambda: self.current_page.xpath("//*[contains(text(), ' - ') and (contains(text(), 'Bar') or contains(text(), 'Court') or contains(text(), 'License'))]"),
-            # Strategy 3: Look in credential/admission sections
-            lambda: self.current_page.css(".admissions *, .credentials *, .bar *, .license *"),
-            # Strategy 4: Look for list items with credential patterns
-            lambda: self.current_page.xpath("//li[contains(text(), 'Bar') or contains(text(), 'Court') or contains(text(), 'License') or contains(text(), 'Admission')]"),
-            # Strategy 5: Pattern matching for common formats
-            lambda: self._find_by_credential_patterns(),
-            # Strategy 6: Look in common structural locations
-            lambda: self.current_page.css(".bio *, .profile *, .details *").filter(lambda x: self._contains_credential_keywords(x))
-        ]
-        
-        for strategy in strategies:
-            try:
-                elements = strategy()
-                if elements:
-                    # Filter to most relevant credential elements
-                    filtered = self._filter_credential_elements(elements)
-                    if filtered:
-                        logger.debug(f"Found {len(filtered)} credential elements")
-                        return filtered
-            except Exception as e:
-                logger.debug(f"Credential strategy failed: {e}")
-                continue
-        
-        return []
-    
-    def _find_by_credential_patterns(self) -> List:
-        """Find credentials using regex patterns for common formats."""
-        import re
-        
-        # Common credential patterns
-        patterns = [
-            r'\w+\s*-\s*\w*Bar\w*',  # "State - Bar", "Country - Bar Association"
-            r'\w+\s*Bar\s*\w*',      # "State Bar", "Bar Association"
-            r'\w+\s*Court\s*\w*',    # "Supreme Court", "High Court"
-            r'\w+\s*License\w*',     # "State License", "Professional License"
-            r'\w+\s*Admission\w*'    # "Bar Admission", "Court Admission"
-        ]
-        
-        found_elements = []
-        
-        try:
-            # Get all text elements on page
-            all_text_elements = self.current_page.css("*").filter(lambda x: hasattr(x, 'text') and x.text and x.text.strip())
-            
-            for element in all_text_elements:
-                text = element.text.strip()
-                for pattern in patterns:
-                    if re.search(pattern, text, re.IGNORECASE):
-                        found_elements.append(element)
-                        break
-                        
-        except Exception as e:
-            logger.debug(f"Pattern matching failed: {e}")
-            
-        return found_elements
-    
-    def _contains_credential_keywords(self, element) -> bool:
-        """Check if element contains credential-related keywords."""
-        if not hasattr(element, 'text') or not element.text:
-            return False
-            
-        text = element.text.lower()
-        keywords = ['bar', 'court', 'license', 'admission', 'attorney', 'solicitor', 'barrister']
-        return any(keyword in text for keyword in keywords)
-    
-    def _filter_credential_elements(self, elements) -> List:
-        """Filter elements to return most relevant credential information."""
-        if not elements:
-            return []
-            
-        # Score elements based on credential relevance
-        scored_elements = []
-        
-        for element in elements:
-            score = 0
-            if hasattr(element, 'text') and element.text:
-                text = element.text.lower()
-                
-                # Higher score for more specific credential terms
-                if 'bar' in text: score += 3
-                if 'court' in text: score += 3
-                if 'license' in text: score += 2
-                if 'admission' in text: score += 2
-                if ' - ' in text: score += 2  # Common format: "State - Bar"
-                if any(state in text for state in ['california', 'new york', 'texas', 'florida', 'egypt', 'england']): score += 1
-                
-                # Penalize very long text (likely not specific credentials)
-                if len(text) > 200: score -= 2
-                
-                scored_elements.append((score, element))
-        
-        # Sort by score and return top elements
-        scored_elements.sort(key=lambda x: x[0], reverse=True)
-        return [elem for score, elem in scored_elements if score > 0][:5]  # Top 5 most relevant
-    
-    def _find_education_intelligently(self) -> List:
-        """Find education information using intelligent strategies."""
-        strategies = [
-            lambda: self.current_page.css(".education li, .education p, .education div"),
-            lambda: self.current_page.css(".is-style-no-bullets li"),
-            lambda: self.current_page.xpath("//li[contains(text(), 'University') or contains(text(), 'College') or contains(text(), 'School')]"),
-            lambda: self.current_page.css("*").filter(lambda x: self._contains_education_keywords(x))
-        ]
-        
-        for strategy in strategies:
-            try:
-                elements = strategy()
-                if elements:
-                    return elements[:10]  # Limit to reasonable number
-            except Exception:
-                continue
-        return []
-    
-    def _contains_education_keywords(self, element) -> bool:
-        """Check if element contains education-related keywords."""
-        if not hasattr(element, 'text') or not element.text:
-            return False
-            
-        text = element.text.lower()
-        keywords = ['university', 'college', 'school', 'degree', 'bachelor', 'master', 'phd', 'law school']
-        return any(keyword in text for keyword in keywords)
-    
-    def _find_position_intelligently(self) -> List:
-        """Find position/title information using intelligent strategies."""
-        strategies = [
-            lambda: self.current_page.css(".title, .position, .role, .designation"),
-            lambda: self.current_page.xpath("//span[contains(@class, 'title') or contains(@class, 'position')]"),
-            lambda: self.current_page.css("*").filter(lambda x: self._contains_position_keywords(x))
-        ]
-        
-        for strategy in strategies:
-            try:
-                elements = strategy()
-                if elements:
-                    return elements[:5]
-            except Exception:
-                continue
-        return []
-    
-    def _contains_position_keywords(self, element) -> bool:
-        """Check if element contains position-related keywords."""
-        if not hasattr(element, 'text') or not element.text:
-            return False
-            
-        text = element.text.lower()
-        keywords = ['partner', 'associate', 'counsel', 'director', 'manager', 'attorney', 'lawyer']
-        return any(keyword in text for keyword in keywords)
-    
-    def _find_contact_intelligently(self, label: str) -> List:
-        """Find contact information using intelligent strategies."""
-        if 'email' in label:
-            strategies = [
-                lambda: self.current_page.css("a[href^='mailto:']"),
-                lambda: self.current_page.css(".email, .contact-email"),
-                lambda: self.current_page.xpath("//*[contains(@href, '@') or contains(text(), '@')]"),
+        """Try to find elements based on content patterns."""
+        if element.element_type == 'text' and hasattr(element, 'expected_pattern'):
+            # Look for elements containing expected text patterns
+            content_xpaths = [
+                f"//*[contains(text(), '{pattern}')]" 
+                for pattern in getattr(element, 'expected_patterns', [])
             ]
-        elif 'phone' in label:
-            strategies = [
-                lambda: self.current_page.css("a[href^='tel:']"),
-                lambda: self.current_page.css(".phone, .contact-phone"),
-                lambda: self.current_page.xpath("//*[contains(@href, 'tel:') or contains(text(), '+') or contains(text(), '(')]"),
-            ]
-        else:
-            return []
             
-        for strategy in strategies:
-            try:
-                elements = strategy()
-                if elements:
-                    return elements[:3]
-            except Exception:
-                continue
-        return []
-    
-    def _find_generic_text_patterns(self, element: ElementSelector) -> List:
-        """Find elements using generic text pattern matching."""
-        # Extract potential keywords from original selector
-        keywords = self._extract_keywords_from_selector(element.selector)
-        
-        if keywords:
-            for keyword in keywords:
+            for xpath in content_xpaths:
                 try:
-                    elements = self.current_page.xpath(f"//*[contains(text(), '{keyword}')]") 
+                    elements = self.current_page.xpath(xpath)
                     if elements:
-                        return elements[:5]
+                        return elements
                 except Exception:
                     continue
-        
         return []
-    
-    def _extract_keywords_from_selector(self, selector: str) -> List[str]:
-        """Extract meaningful keywords from a selector."""
-        import re
-        
-        keywords = []
-        
-        # Extract from contains() functions
-        contains_matches = re.findall(r"contains\([^,]+,\s*['\"]([^'\"]+)['\"]\)", selector)
-        keywords.extend(contains_matches)
-        
-        # Extract class names
-        class_matches = re.findall(r"@class\s*=\s*['\"]([^'\"]+)['\"]", selector)
-        keywords.extend(class_matches)
-        
-        # Extract ID values
-        id_matches = re.findall(r"@id\s*=\s*['\"]([^'\"]+)['\"]", selector)
-        keywords.extend(id_matches)
-        
-        return [k for k in keywords if len(k) > 2]  # Filter out very short keywords
     
     def _try_structure_based_selection(self, element: ElementSelector) -> List:
         """Try to find elements based on structural patterns."""
@@ -1032,83 +959,6 @@ class ScraplingRunner:
         except Exception:
             pass
         return []
-    
-    def _try_fuzzy_matching(self, element: ElementSelector) -> List:
-        """Try fuzzy matching with selector variations."""
-        try:
-            original_selector = element.selector
-            variations = self._generate_selector_variations(original_selector)
-            
-            for variation in variations:
-                try:
-                    if element.selector_type == 'xpath':
-                        elements = self.current_page.xpath(variation, auto_match=True)
-                    else:
-                        elements = self.current_page.css(variation, auto_match=True)
-                    
-                    if elements:
-                        logger.debug(f"Fuzzy matching successful with: {variation}")
-                        return elements
-                except Exception:
-                    continue
-                    
-        except Exception as e:
-            logger.debug(f"Fuzzy matching failed: {e}")
-            
-        return []
-    
-    def _generate_selector_variations(self, selector: str) -> List[str]:
-        """Generate variations of a selector for fuzzy matching."""
-        variations = []
-        
-        try:
-            # For XPath selectors with specific text content
-            if 'contains(text(),' in selector:
-                import re
-                # Extract the text being searched for
-                text_matches = re.findall(r"contains\(text\(\),\s*['\"]([^'\"]+)['\"]\)", selector)
-                
-                for text in text_matches:
-                    # Create more flexible variations
-                    if ' - ' in text:  # Handle "Country - Bar" patterns
-                        parts = text.split(' - ')
-                        if len(parts) == 2:
-                            # Try variations like "Country Bar", "Bar", etc.
-                            variations.extend([
-                                selector.replace(text, parts[1]),  # Just "Bar"
-                                selector.replace(text, f"{parts[0]} {parts[1]}"),  # "Country Bar"
-                                selector.replace(text, parts[1].replace('Bar', 'bar')),  # lowercase
-                                f"//*[contains(text(), '{parts[1]}')]",  # Simple xpath for just the credential type
-                            ])
-                    
-                    # Try partial matches
-                    words = text.split()
-                    for word in words:
-                        if len(word) > 3:  # Skip short words
-                            variations.append(f"//*[contains(text(), '{word}')]")
-                    
-                    # Try case variations
-                    variations.extend([
-                        selector.replace(text, text.lower()),
-                        selector.replace(text, text.upper()),
-                        selector.replace(text, text.title())
-                    ])
-            
-            # For structural selectors, try making them more flexible
-            if 'xpath:' in selector:
-                base_selector = selector.replace('xpath:', '')
-                # Try removing position-specific parts
-                variations.extend([
-                    base_selector.replace('[1]', ''),
-                    base_selector.replace('[2]', ''),
-                    base_selector.replace('//*', '//'),
-                    f"({base_selector})[1]",  # Wrap in parentheses and get first
-                ])
-                
-        except Exception as e:
-            logger.debug(f"Error generating selector variations: {e}")
-            
-        return list(set(variations))  # Remove duplicates
     
     def _generate_semantic_xpaths(self, element: ElementSelector) -> List[str]:
         """
@@ -1580,6 +1430,41 @@ class ScraplingRunner:
                             logger.warning(f"Error extracting text from container {i}: {text_error}")
                             container_data['text'] = ''
                     
+                            # Handle subpage navigation if profile link exists and subpage elements are defined
+                    if (profile_link and 
+                        hasattr(element_config, 'subpage_elements') and 
+                        element_config.subpage_elements):
+                        
+                        logger.info(f"Navigating to subpage for container {i}: {profile_link}")
+                        subpage_data = self._extract_subpage_data(profile_link, element_config.subpage_elements)
+                        
+                        if subpage_data:
+                            # Merge subpage data with container data
+                            container_data.update(subpage_data)
+                            logger.debug(f"Merged subpage data for container {i}: {list(subpage_data.keys())}")
+                    
+                    # Handle containers that should extract data from subpages (education, credentials)
+                    elif (profile_link and 
+                          self._is_subpage_container(element_config)):
+                        
+                        logger.info(f"Container '{element_config.label}' needs subpage data - navigating to: {profile_link}")
+                        subpage_data = self._extract_subpage_container_data(profile_link, element_config)
+                        
+                        if subpage_data:
+                            # Replace container data with subpage data
+                            container_data.update(subpage_data)
+                            logger.debug(f"Extracted subpage container data for {element_config.label}: {list(subpage_data.keys())}")
+                    
+                    # Handle legacy follow_links behavior (for single container with follow_links=True)
+                    elif (hasattr(element_config, 'follow_links') and 
+                          element_config.follow_links and 
+                          profile_link and 
+                          not hasattr(element_config, 'subpage_elements')):
+                        
+                        logger.info(f"Following link for container {i} (legacy mode): {profile_link}")
+                        # This will be handled by the existing _process_container_subpages method
+                        container_data['_follow_link'] = True
+                    
                     # Add container index for reference
                     container_data['_container_index'] = i
                     containers.append(container_data)
@@ -2023,7 +1908,7 @@ class ScraplingRunner:
         try:
             # Check if we have both main and subpage data to merge
             main_data = scraped_data.get('main', [])
-            subpage_data = scraped_data.get('subpage', []) or scraped_data.get('sublink', []) or scraped_data.get('sublink_container', []) or scraped_data.get('subcon', [])
+            subpage_data = scraped_data.get('subpage', []) or scraped_data.get('sublink', []) or scraped_data.get('sublink_container', [])
             
             if not main_data:
                 logger.info("No main directory data to merge")
@@ -2038,12 +1923,14 @@ class ScraplingRunner:
                 if not isinstance(main_entry, dict):
                     continue
                 
-                # Start with all existing data from main entry (preserves intelligent sublink data)
-                merged_entry = main_entry.copy()
-                
-                # Ensure standard fields are properly set
-                if 'profile_link' not in merged_entry or not merged_entry['profile_link']:
-                    merged_entry['profile_link'] = main_entry.get('_profile_link') or main_entry.get('email', '').replace('mailto:', 'https://www.gibsondunn.com/lawyer/') if main_entry.get('email') else None
+                # Create base entry with main data
+                merged_entry = {
+                    'name': main_entry.get('name'),
+                    'position': main_entry.get('position'),
+                    'sector': main_entry.get('sector'),
+                    'email': main_entry.get('email'),
+                    'profile_link': main_entry.get('_profile_link')
+                }
                 
                 # Find corresponding subpage data by container index
                 container_index = main_entry.get('_container_index')
@@ -3067,724 +2954,6 @@ class ScraplingRunner:
                 flattened[key] = value
         
         return flattened
-    
-    def _process_intelligent_sublinks(self, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Intelligently detect and process sub-links for additional data extraction.
-        
-        This method:
-        1. Detects when profile links are extracted from directory pages
-        2. Identifies containers that likely need subpage data (education, credentials)
-        3. Automatically follows links to extract additional data
-        4. Uses optimized extraction for better performance
-        
-        Args:
-            scraped_data: Main page scraped data
-            
-        Returns:
-            Enhanced data with subpage information
-        """
-        enhanced_data = scraped_data.copy()
-        
-        try:
-            # Check for containers with profile links that need subpage data
-            subpage_containers = self._detect_subpage_containers(enhanced_data)
-            
-            if not subpage_containers:
-                logger.info("No containers detected as needing subpage data")
-                return enhanced_data
-            
-            # Process each container that needs subpage data
-            for main_container, subpage_container, profile_urls in subpage_containers:
-                logger.info(f"Processing intelligent sublinks: {main_container.label} -> {subpage_container.label} ({len(profile_urls)} URLs)")
-                
-                # Extract subpage data using the discovered profile URLs
-                subpage_data = self._extract_subpage_data_from_urls(profile_urls, subpage_container)
-                
-                # Merge the subpage data back into main data
-                enhanced_data = self._merge_subpage_data_into_main(
-                    enhanced_data, main_container.label, subpage_data
-                )
-                
-                # Remove the separate subpage container from results to avoid duplication
-                if subpage_container.label in enhanced_data:
-                    del enhanced_data[subpage_container.label]
-                    
-        except Exception as e:
-            logger.error(f"Error in intelligent sublink processing: {e}")
-            # Continue with original data if sublink processing fails
-        
-        return enhanced_data
-    
-    def _should_use_dual_engine_mode(self) -> bool:
-        """
-        Determine if dual-engine mode should be used for sublink processing.
-        
-        Dual-engine mode is used when:
-        1. Template has sublink containers that failed on main page
-        2. Template has actions with target URLs (indicating navigation)
-        3. Expected data volume is high (>10 expected profiles)
-        
-        Returns:
-            True if dual-engine mode should be used
-        """
-        # Check for sublink containers
-        has_sublink_containers = any(
-            hasattr(elem, 'is_container') and elem.is_container and 
-            elem.label.lower() in ['sublink', 'subcon', 'subpage']
-            for elem in self.template.elements
-        )
-        
-        # Check for actions with target URLs
-        has_action_urls = any(
-            hasattr(action, 'target_url') and action.target_url and action.action_type == 'click'
-            for action in self.template.actions if hasattr(self.template, 'actions')
-        )
-        
-        # Check if this looks like a large-scale directory scraping operation
-        looks_like_large_directory = self._looks_like_directory_template()
-        
-        should_use_dual = has_sublink_containers or (has_action_urls and looks_like_large_directory)
-        
-        if should_use_dual:
-            logger.info(f"Dual-engine mode enabled: sublink_containers={has_sublink_containers}, action_urls={has_action_urls}, large_directory={looks_like_large_directory}")
-        else:
-            logger.info("Using single-engine mode for sublink processing")
-        
-        return should_use_dual
-    
-    def _process_dual_engine_sublinks(self, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process sublinks using dual-engine architecture for improved performance.
-        
-        Engine 1 (Directory): Already completed - scraped main directory data
-        Engine 2 (Sublinks): Parallel processing of individual profile pages
-        
-        Args:
-            scraped_data: Main page scraped data from Engine 1
-            
-        Returns:
-            Enhanced data with subpage information from Engine 2
-        """
-        logger.info("Starting dual-engine sublink processing")
-        enhanced_data = scraped_data.copy()
-        
-        try:
-            # Step 1: Detect subpage containers and profile URLs (Engine 1 analysis)
-            subpage_containers = self._detect_subpage_containers_dual_engine(enhanced_data)
-            
-            if not subpage_containers:
-                logger.info("No containers detected for dual-engine sublink processing")
-                return enhanced_data
-            
-            # Step 2: Extract all profile URLs and prepare for parallel processing
-            all_profile_urls = []
-            container_mapping = {}
-            
-            for main_container, subpage_container, profile_urls in subpage_containers:
-                all_profile_urls.extend(profile_urls)
-                container_mapping[main_container.label] = {
-                    'subpage_container': subpage_container,
-                    'profile_urls': profile_urls
-                }
-                logger.info(f"Prepared {len(profile_urls)} URLs for dual-engine processing: {main_container.label} -> {subpage_container.label}")
-            
-            # Step 3: Launch Engine 2 - Parallel sublink processing
-            logger.info(f"Launching Engine 2 for parallel processing of {len(all_profile_urls)} profile pages")
-            subpage_results = self._execute_engine_2_parallel_sublinks(
-                all_profile_urls, 
-                list(container_mapping.values())
-            )
-            
-            # Step 4: Merge results back into main data
-            for main_label, mapping in container_mapping.items():
-                subpage_container = mapping['subpage_container']
-                profile_urls = mapping['profile_urls']
-                
-                # Filter subpage results for this container
-                container_subpage_data = {
-                    url: data for url, data in subpage_results.items() 
-                    if url in profile_urls
-                }
-                
-                # Merge into main data
-                enhanced_data = self._merge_subpage_data_into_main(
-                    enhanced_data, main_label, container_subpage_data
-                )
-                
-                # Remove separate subpage container to avoid duplication
-                if subpage_container.label in enhanced_data:
-                    del enhanced_data[subpage_container.label]
-            
-            logger.info(f"Dual-engine sublink processing completed successfully")
-            
-        except Exception as e:
-            logger.error(f"Error in dual-engine sublink processing: {e}")
-            # Fallback to single-engine mode
-            logger.info("Falling back to single-engine sublink processing")
-            enhanced_data = self._process_intelligent_sublinks(scraped_data)
-        
-        return enhanced_data
-    
-    def _detect_subpage_containers_dual_engine(self, scraped_data: Dict[str, Any]) -> List[tuple]:
-        """
-        Enhanced subpage container detection for dual-engine mode.
-        
-        This version also considers action URLs for profile link discovery.
-        
-        Args:
-            scraped_data: The scraped data to analyze
-            
-        Returns:
-            List of tuples (main_container, subpage_container, profile_urls)
-        """
-        container_pairs = []
-        
-        logger.info("Analyzing scraped data for dual-engine subpage detection")
-        
-        # Analyze each container in the scraped data
-        containers_with_links = []
-        containers_with_failed_selectors = []
-        
-        for element in self.template.elements:
-            if not (hasattr(element, 'is_container') and element.is_container):
-                continue
-                
-            container_data = scraped_data.get(element.label, [])
-            if not isinstance(container_data, list) or not container_data:
-                continue
-            
-            logger.debug(f"Analyzing container '{element.label}' with {len(container_data)} items")
-            
-            # Check if this container has HTTP URLs (potential profile links)
-            profile_urls = self._extract_profile_urls_from_container(container_data)
-            
-            # Enhanced URL extraction: also check action URLs
-            if not profile_urls and hasattr(self.template, 'actions'):
-                profile_urls = self._extract_urls_from_actions()
-            
-            if profile_urls:
-                containers_with_links.append((element, profile_urls))
-                logger.info(f"Container '{element.label}' has {len(profile_urls)} profile URLs")
-            
-            # Check if this container has selectors that found no meaningful data
-            if self._container_has_failed_selectors(element, container_data):
-                containers_with_failed_selectors.append(element)
-                logger.info(f"Container '{element.label}' has selectors that failed on main page")
-        
-        # Pair containers with links + containers with failed selectors
-        for main_container, profile_urls in containers_with_links:
-            for subpage_container in containers_with_failed_selectors:
-                if main_container.label != subpage_container.label:  # Don't pair with self
-                    container_pairs.append((main_container, subpage_container, profile_urls))
-                    logger.info(f"Detected dual-engine subpage pair: {main_container.label} -> {subpage_container.label} ({len(profile_urls)} URLs)")
-        
-        logger.info(f"Found {len(container_pairs)} container pairs for dual-engine subpage processing")
-        return container_pairs
-    
-    def _extract_urls_from_actions(self) -> List[str]:
-        """
-        Extract profile URLs from template actions.
-        
-        Returns:
-            List of profile URLs from action target_urls
-        """
-        urls = []
-        
-        if not hasattr(self.template, 'actions'):
-            return urls
-        
-        for action in self.template.actions:
-            if (hasattr(action, 'target_url') and action.target_url and 
-                action.action_type == 'click' and '/lawyer/' in action.target_url):
-                urls.append(action.target_url)
-                logger.debug(f"Found action URL: {action.target_url}")
-        
-        return urls
-    
-    def _execute_engine_2_parallel_sublinks(self, profile_urls: List[str], container_mappings: List[Dict]) -> Dict[str, Dict]:
-        """
-        Execute Engine 2: Parallel processing of profile pages for sublink data extraction.
-        
-        Args:
-            profile_urls: List of all profile URLs to process
-            container_mappings: List of container mapping configurations
-            
-        Returns:
-            Dictionary mapping profile URLs to extracted subpage data
-        """
-        logger.info(f"Engine 2 starting parallel processing of {len(profile_urls)} profile pages")
-        
-        # Determine optimal concurrency level (max 5 concurrent requests to be respectful)
-        max_workers = min(5, len(profile_urls))
-        
-        all_subpage_results = {}
-        
-        # Use ThreadPoolExecutor for parallel processing
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all profile page processing tasks
-            future_to_url = {}
-            
-            for profile_url in profile_urls:
-                # Find the appropriate subpage container for this URL
-                subpage_container = None
-                for mapping in container_mappings:
-                    if profile_url in mapping['profile_urls']:
-                        subpage_container = mapping['subpage_container']
-                        break
-                
-                if subpage_container:
-                    future = executor.submit(
-                        self._extract_single_profile_data_engine_2, 
-                        profile_url, 
-                        subpage_container
-                    )
-                    future_to_url[future] = profile_url
-                else:
-                    logger.warning(f"No subpage container found for URL: {profile_url}")
-            
-            # Collect results as they complete
-            completed_count = 0
-            for future in as_completed(future_to_url):
-                profile_url = future_to_url[future]
-                completed_count += 1
-                
-                try:
-                    subpage_data = future.result(timeout=30)  # 30 second timeout per page
-                    if subpage_data:
-                        all_subpage_results[profile_url] = subpage_data
-                        logger.info(f"Engine 2 [{completed_count}/{len(profile_urls)}] extracted data from {profile_url}: {list(subpage_data.keys())}")
-                    else:
-                        logger.debug(f"Engine 2 [{completed_count}/{len(profile_urls)}] no data from {profile_url}")
-                        
-                except Exception as e:
-                    logger.warning(f"Engine 2 [{completed_count}/{len(profile_urls)}] failed for {profile_url}: {e}")
-                    continue
-        
-        logger.info(f"Engine 2 completed: Successfully extracted data from {len(all_subpage_results)} out of {len(profile_urls)} profile pages")
-        return all_subpage_results
-    
-    def _extract_single_profile_data_engine_2(self, profile_url: str, subpage_container) -> Dict[str, Any]:
-        """
-        Extract data from a single profile page using Engine 2 (dedicated Scrapling instance).
-        
-        Args:
-            profile_url: URL of the profile page to process
-            subpage_container: Container configuration for subpage data extraction
-            
-        Returns:
-            Dictionary containing extracted subpage data
-        """
-        page_data = {}
-        
-        try:
-            # Create a dedicated fetcher instance for this profile page
-            profile_fetcher = PlayWrightFetcher
-            
-            # Fetch the profile page
-            fetch_options = {
-                'headless': self.template.headless,
-                'network_idle': True,
-                'timeout': self.template.wait_timeout * 1000
-            }
-            
-            profile_page = profile_fetcher.fetch(profile_url, **fetch_options)
-            
-            if not profile_page or profile_page.status != 200:
-                logger.warning(f"Engine 2 failed to fetch profile page: {profile_url} (status: {profile_page.status if profile_page else 'None'})")
-                return page_data
-            
-            # Extract subpage data using the subpage container configuration
-            if hasattr(subpage_container, 'sub_elements') and subpage_container.sub_elements:
-                for sub_element in subpage_container.sub_elements:
-                    try:
-                        # Get sub-element configuration
-                        if hasattr(sub_element, 'label'):
-                            sub_label = sub_element.label
-                            sub_selector = sub_element.selector
-                        else:
-                            sub_label = sub_element.get('label', '')
-                            sub_selector = sub_element.get('selector', '')
-                        
-                        if sub_selector:
-                            # Use XPath if specified, otherwise CSS
-                            if sub_selector.startswith('xpath:'):
-                                xpath_selector = sub_selector[6:]  # Remove 'xpath:' prefix
-                                elements = profile_page.xpath(xpath_selector)
-                            else:
-                                elements = profile_page.css(sub_selector)
-                            
-                            if elements:
-                                # Extract text from first matching element
-                                extracted_value = elements[0].text.strip() if elements[0].text else None
-                                if extracted_value and extracted_value.lower() != 'none':
-                                    page_data[sub_label] = extracted_value
-                                    logger.debug(f"Engine 2 extracted {sub_label}: {extracted_value[:50]}...")
-                            else:
-                                logger.debug(f"Engine 2 found no elements for {sub_label} with selector: {sub_selector}")
-                                
-                    except Exception as e:
-                        logger.warning(f"Engine 2 failed to extract {sub_label} from {profile_url}: {e}")
-                        continue
-            
-        except Exception as e:
-            logger.error(f"Engine 2 error processing {profile_url}: {e}")
-        
-        return page_data
-    
-    def _detect_subpage_containers(self, scraped_data: Dict[str, Any]) -> List[tuple]:
-        """
-        Detect containers that need subpage data extraction based on actual scraped data.
-        
-        This is a robust, generic approach that works across different sites by analyzing
-        the actual data structure rather than hardcoding assumptions.
-        
-        NOTE: This is the original single-engine method. For dual-engine mode,
-        use _detect_subpage_containers_dual_engine instead.
-        
-        Args:
-            scraped_data: The scraped data to analyze
-            
-        Returns:
-            List of tuples (main_container, subpage_container, profile_urls) where:
-            - main_container: Container element that has profile links in scraped data
-            - subpage_container: Container element with selectors that failed on main page
-            - profile_urls: List of profile URLs found in main container data
-        """
-        container_pairs = []
-        
-        logger.info(f"Analyzing scraped data for intelligent subpage detection")
-        
-        # Analyze each container in the scraped data
-        containers_with_links = []
-        containers_with_failed_selectors = []
-        
-        for element in self.template.elements:
-            if not (hasattr(element, 'is_container') and element.is_container):
-                continue
-                
-            container_data = scraped_data.get(element.label, [])
-            if not isinstance(container_data, list) or not container_data:
-                continue
-            
-            logger.debug(f"Analyzing container '{element.label}' with {len(container_data)} items")
-            
-            # Check if this container has HTTP URLs (potential profile links)
-            profile_urls = self._extract_profile_urls_from_container(container_data)
-            if profile_urls:
-                containers_with_links.append((element, profile_urls))
-                logger.info(f"Container '{element.label}' has {len(profile_urls)} profile URLs")
-            
-            # Check if this container has selectors that found no meaningful data
-            # (indicating they might work better on subpages)
-            if self._container_has_failed_selectors(element, container_data):
-                containers_with_failed_selectors.append(element)
-                logger.info(f"Container '{element.label}' has selectors that failed on main page")
-        
-        # Pair containers with links + containers with failed selectors
-        for main_container, profile_urls in containers_with_links:
-            for subpage_container in containers_with_failed_selectors:
-                if main_container.label != subpage_container.label:  # Don't pair with self
-                    container_pairs.append((main_container, subpage_container, profile_urls))
-                    logger.info(f"Detected subpage pair: {main_container.label} -> {subpage_container.label} ({len(profile_urls)} URLs)")
-        
-        logger.info(f"Found {len(container_pairs)} container pairs for subpage processing")
-        return container_pairs
-    
-    def _extract_profile_urls_from_container(self, container_data: List[Dict]) -> List[str]:
-        """
-        Extract HTTP URLs from container data that could be profile links.
-        
-        Args:
-            container_data: List of dictionaries from a container
-            
-        Returns:
-            List of unique HTTP URLs found in the data
-        """
-        urls = set()
-        
-        for item in container_data:
-            if not isinstance(item, dict):
-                continue
-                
-            for key, value in item.items():
-                if isinstance(value, str) and value.startswith('http'):
-                    # Filter out obvious non-profile URLs
-                    if not any(skip in value.lower() for skip in ['mailto:', 'tel:', 'javascript:', '#']):
-                        urls.add(value)
-        
-        return list(urls)
-    
-    def _container_has_failed_selectors(self, element, container_data: List[Dict]) -> bool:
-        """
-        Check if a container has selectors that consistently failed to find meaningful data.
-        
-        This indicates the selectors might work better on individual subpages.
-        
-        Args:
-            element: Container element configuration
-            container_data: Scraped data from this container
-            
-        Returns:
-            True if container has selectors that failed on main page
-        """
-        if not hasattr(element, 'sub_elements') or not element.sub_elements:
-            return False
-        
-        # If container data is empty, all selectors failed
-        if not container_data:
-            return True
-        
-        # Check if most items have empty/None values for most fields
-        total_fields = 0
-        empty_fields = 0
-        
-        for item in container_data:
-            if not isinstance(item, dict):
-                continue
-                
-            for key, value in item.items():
-                if not key.startswith('_'):  # Skip internal fields
-                    total_fields += 1
-                    if value is None or value == '' or value == 'None':
-                        empty_fields += 1
-        
-        # If more than 70% of fields are empty, consider selectors as failed
-        if total_fields > 0:
-            failure_rate = empty_fields / total_fields
-            logger.debug(f"Container '{element.label}' has {failure_rate:.2%} empty fields")
-            return failure_rate > 0.7
-        
-        return False
-    
-    def _extract_subpage_data_from_urls(self, profile_urls: List[str], subpage_container) -> Dict[str, Dict]:
-        """
-        Extract subpage data from a list of profile URLs.
-        
-        Args:
-            profile_urls: List of profile URLs to extract data from
-            subpage_container: Container configuration for subpage data
-            
-        Returns:
-            Dictionary mapping profile URLs to extracted subpage data
-        """
-        subpage_results = {}
-        
-        if not profile_urls:
-            logger.warning("No profile URLs provided for subpage extraction")
-            return subpage_results
-        
-        logger.info(f"Extracting subpage data from {len(profile_urls)} profile pages")
-        
-        # Process each profile URL
-        for i, profile_url in enumerate(profile_urls):
-            try:
-                logger.debug(f"Processing profile {i+1}/{len(profile_urls)}: {profile_url}")
-                
-                # Fetch the profile page
-                profile_page = self._fetch_page(profile_url)
-                if not profile_page:
-                    logger.warning(f"Failed to fetch profile page: {profile_url}")
-                    continue
-                
-                # Temporarily switch context to profile page
-                original_page = self.current_page
-                self.current_page = profile_page
-                
-                # Extract subpage data using the subpage container configuration
-                page_data = {}
-                if hasattr(subpage_container, 'sub_elements') and subpage_container.sub_elements:
-                    for sub_element in subpage_container.sub_elements:
-                        try:
-                            # Extract using the sub-element selector on the profile page
-                            sub_label = getattr(sub_element, 'label', '') if hasattr(sub_element, 'label') else sub_element.get('label', '')
-                            sub_selector = getattr(sub_element, 'selector', '') if hasattr(sub_element, 'selector') else sub_element.get('selector', '')
-                            
-                            if sub_selector:
-                                # Use XPath if specified, otherwise CSS
-                                if sub_selector.startswith('xpath:'):
-                                    xpath_selector = sub_selector[6:]  # Remove 'xpath:' prefix
-                                    elements = profile_page.xpath(xpath_selector)
-                                else:
-                                    elements = profile_page.css(sub_selector)
-                                
-                                logger.debug(f"Selector '{sub_selector}' found {len(elements)} elements on {profile_url}")
-                                
-                                if elements:
-                                    # Extract text from first matching element
-                                    extracted_value = elements[0].text.strip() if elements[0].text else None
-                                    if extracted_value and extracted_value.lower() != 'none':
-                                        page_data[sub_label] = extracted_value
-                                        logger.info(f"Extracted {sub_label}: {extracted_value[:50]}...")
-                                    else:
-                                        logger.debug(f"Element found but no meaningful text content for {sub_label}: '{extracted_value}'")
-                                else:
-                                    logger.debug(f"No elements found for {sub_label} with selector: {sub_selector}")
-                                
-                        except Exception as e:
-                            logger.warning(f"Failed to extract {sub_label} from {profile_url}: {e}")
-                            continue
-                
-                # Store the extracted data
-                if page_data:
-                    subpage_results[profile_url] = page_data
-                    logger.info(f"Successfully extracted {len(page_data)} fields from {profile_url}: {list(page_data.keys())}")
-                else:
-                    logger.debug(f"No meaningful data extracted from {profile_url}")
-                
-                # Restore original page context
-                self.current_page = original_page
-                
-                # Add delay between requests to be respectful
-                if i < len(profile_urls) - 1:
-                    time.sleep(1)
-                    
-            except Exception as e:
-                logger.error(f"Error processing profile URL {profile_url}: {e}")
-                continue
-        
-        logger.info(f"Successfully extracted subpage data from {len(subpage_results)} profile pages")
-        logger.info(f"Subpage results keys: {list(subpage_results.keys())[:3]}...")  # Show first 3 URLs
-        logger.info(f"Sample subpage data: {list(subpage_results.values())[:1] if subpage_results else 'None'}")
-        return subpage_results
-    
-    def _extract_subpage_data_optimized(self, main_data: List[Dict], subpage_container) -> Dict[str, Dict]:
-        """
-        Extract subpage data using optimized approach to avoid repeated directory loading.
-        
-        Args:
-            main_data: List of main container items with profile links
-            subpage_container: Container configuration for subpage data
-            
-        Returns:
-            Dictionary mapping profile URLs to extracted subpage data
-        """
-        subpage_results = {}
-        
-        # Extract profile URLs from main data
-        profile_urls = []
-        for item in main_data:
-            # Look for profile link fields
-            for key, value in item.items():
-                if ('profile' in key.lower() or 'link' in key.lower()) and isinstance(value, str) and value.startswith('http'):
-                    profile_urls.append(value)
-                    break
-        
-        if not profile_urls:
-            logger.warning("No profile URLs found in main data")
-            return subpage_results
-        
-        logger.info(f"Extracting subpage data from {len(profile_urls)} profile pages")
-        
-        # Process each profile URL
-        for i, profile_url in enumerate(profile_urls):
-            try:
-                logger.debug(f"Processing profile {i+1}/{len(profile_urls)}: {profile_url}")
-                
-                # Fetch the profile page
-                profile_page = self._fetch_page(profile_url)
-                if not profile_page:
-                    logger.warning(f"Failed to fetch profile page: {profile_url}")
-                    continue
-                
-                # Temporarily switch context to profile page
-                original_page = self.current_page
-                self.current_page = profile_page
-                
-                # Extract subpage data using the subpage container configuration
-                page_data = {}
-                if hasattr(subpage_container, 'sub_elements') and subpage_container.sub_elements:
-                    for sub_element in subpage_container.sub_elements:
-                        try:
-                            # Extract using the sub-element selector on the profile page
-                            sub_label = getattr(sub_element, 'label', '') if hasattr(sub_element, 'label') else sub_element.get('label', '')
-                            sub_selector = getattr(sub_element, 'selector', '') if hasattr(sub_element, 'selector') else sub_element.get('selector', '')
-                            
-                            if sub_selector:
-                                # Use XPath if specified, otherwise CSS
-                                if sub_selector.startswith('xpath:'):
-                                    xpath_selector = sub_selector[6:]  # Remove 'xpath:' prefix
-                                    elements = profile_page.xpath(xpath_selector)
-                                else:
-                                    elements = profile_page.css(sub_selector)
-                                
-                                logger.debug(f"Selector '{sub_selector}' found {len(elements)} elements on {profile_url}")
-                                
-                                if elements:
-                                    # Extract text from first matching element
-                                    extracted_value = elements[0].text.strip() if elements[0].text else None
-                                    if extracted_value and extracted_value.lower() != 'none':
-                                        page_data[sub_label] = extracted_value
-                                        logger.info(f"Extracted {sub_label}: {extracted_value[:50]}...")
-                                    else:
-                                        logger.debug(f"Element found but no meaningful text content for {sub_label}: '{extracted_value}'")
-                                else:
-                                    logger.debug(f"No elements found for {sub_label} with selector: {sub_selector}")
-                                
-                        except Exception as e:
-                            logger.warning(f"Failed to extract {sub_label} from {profile_url}: {e}")
-                            continue
-                
-                # Store the extracted data
-                if page_data:
-                    subpage_results[profile_url] = page_data
-                    logger.info(f"Successfully extracted {len(page_data)} fields from {profile_url}: {list(page_data.keys())}")
-                else:
-                    logger.debug(f"No meaningful data extracted from {profile_url}")
-                
-                # Restore original page context
-                self.current_page = original_page
-                
-                # Add delay between requests to be respectful
-                if i < len(profile_urls) - 1:
-                    time.sleep(1)
-                    
-            except Exception as e:
-                logger.error(f"Error processing profile URL {profile_url}: {e}")
-                continue
-        
-        logger.info(f"Successfully extracted subpage data from {len(subpage_results)} profile pages")
-        logger.info(f"Subpage results keys: {list(subpage_results.keys())[:3]}...")  # Show first 3 URLs
-        logger.info(f"Sample subpage data: {list(subpage_results.values())[:1] if subpage_results else 'None'}")
-        return subpage_results
-    
-    def _merge_subpage_data_into_main(self, enhanced_data: Dict, main_label: str, subpage_data: Dict) -> Dict:
-        """
-        Merge subpage data back into main container data.
-        
-        Args:
-            enhanced_data: Current enhanced data
-            main_label: Label of the main container
-            subpage_data: Dictionary mapping profile URLs to extracted data
-            
-        Returns:
-            Enhanced data with subpage information merged in
-        """
-        if main_label not in enhanced_data:
-            return enhanced_data
-        
-        main_items = enhanced_data[main_label]
-        if not isinstance(main_items, list):
-            return enhanced_data
-        
-        # Merge subpage data into corresponding main items
-        merge_count = 0
-        for item in main_items:
-            # Find the profile URL for this item
-            profile_url = None
-            for key, value in item.items():
-                if ('profile' in key.lower() or 'link' in key.lower()) and isinstance(value, str) and value.startswith('http'):
-                    profile_url = value
-                    break
-            
-            # If we have subpage data for this profile URL, merge it
-            if profile_url and profile_url in subpage_data:
-                item.update(subpage_data[profile_url])
-                merge_count += 1
-                logger.info(f"Merged subpage data for: {profile_url} - {list(subpage_data[profile_url].keys())}")
-        
-        logger.info(f"Merged subpage data into {merge_count} out of {len(main_items)} main items")
-        return enhanced_data
 
 
 class BatchScraplingRunner:
