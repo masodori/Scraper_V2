@@ -156,8 +156,9 @@ class ScrapingTemplate(BaseModel):
     @field_validator('url')
     @classmethod
     def validate_url(cls, v):
-        import validators
-        if not validators.url(v):
+        from urllib.parse import urlparse
+        result = urlparse(v)
+        if not all([result.scheme, result.netloc]):
             raise ValueError('Invalid URL format')
         return v
     
