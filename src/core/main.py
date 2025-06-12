@@ -258,6 +258,10 @@ class InteractiveSession:
                 with open(js_path, 'r', encoding='utf-8') as f:
                     js_code = f.read()
                 
+                # Set the original URL in JavaScript before running the main script
+                self.page.evaluate(f"window.originalScrapingUrl = '{url}';")
+                print(f"Set original scraping URL to: {url}")
+                
                 # Check if functions are already exposed and expose them if needed
                 functions_to_expose = [
                     ("save_template_py", self._save_template_callback),

@@ -7,7 +7,7 @@ export function buildTemplate(state) {
     const allElements = [...state.selectedElements, ...state.containers];
     
     const template = {
-        url: window.location.href,
+        url: window.originalScrapingUrl || window.location.href,
         name: 'interactive_template',
         description: `Template created for ${window.location.hostname}`,
         elements: allElements,

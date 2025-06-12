@@ -2582,7 +2582,7 @@
         build: function() {
             const template = {
                 name: this.generateTemplateName(),
-                url: window.location.href,
+                url: window.originalScrapingUrl || window.location.href,
                 description: `Interactive template for ${window.location.hostname}`,
                 elements: [...ScraperState.selectedElements, ...this.convertContainersToElements()],
                 actions: ScraperState.actions,

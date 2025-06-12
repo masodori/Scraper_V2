@@ -1,14 +1,23 @@
 {
-  "name": "gibsondunn.com_20250612T1333",
+  "name": "gibsondunn.com_20250612T1405",
   "description": "Interactive template for www.gibsondunn.com",
   "version": "1.0",
-  "created_at": "2025-06-12T13:33:53.710000+00:00",
-  "url": "https://www.gibsondunn.com/people/",
+  "created_at": "2025-06-12T14:05:00.479000+00:00",
+  "url": "https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/",
   "user_agent": null,
   "headless": true,
   "wait_timeout": 30.0,
   "page_load_timeout": 60.0,
   "cookies": [
+    {
+      "name": "Path",
+      "value": "/",
+      "domain": "www.gibsondunn.com",
+      "path": "/wp-json/wcc/v1",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "Lax"
+    },
     {
       "name": "Path",
       "value": "/",
@@ -20,16 +29,7 @@
     },
     {
       "name": "__cf_bm",
-      "value": "YF_VyZIVAt8lqm_v3daeF_gGScsk3yjcU3Ay7B9qi8Q-1749735090-1.0.1.1-hTvsOHEErfVyTGpNtXrY7gpilMgs843vel7UR1Ys8Fx0oh8Gei_wTDF_iNJxx8svJdWYfZh8WE.1KqNlLU.skAVWhSY7ADervk9siiiUdBM",
-      "domain": ".gibsondunn.com",
-      "path": "/",
-      "secure": true,
-      "httpOnly": true,
-      "sameSite": "None"
-    },
-    {
-      "name": "cf_clearance",
-      "value": "mAotKlMkUEU5ak18s8B16WJdQMhlfSenwm78iErWJdE-1749735090-1.2.1.1-JMI_UuTJayjkcARUFs48hNODgtoJ8C3Rw90HvtCO5t4Q0r3Jz2kej61gCFmBjdeDgJBAg.BUgctItq5oLBLG7323AdCGVnh.TCgWfHux3Duwwi1NT111bzXq5lbr0GEQyT6CoKj3HxWwWILTNp5xFPZ15_xjGowyiP52IzCwiyEnh5wnC6PJ5CQveMrxAMg3ggNJDyg2aKAnW2sY3xL_cbHvSrBZZWLgHKHNStA5__WDNRCUpRhd2QMDP4OOLrcmirhqLAuNHHYLZvAnCbpzuEeObyD68OLHNzBMWVlQDMUOPgcRTmopJjVb0X9HMLBqhW1JfNtxrYlP8reHSI8E4MJK7bOJWWOTwpHRROdKU7g",
+      "value": "jj5kYTKav7WhUEkVGsy77z35Rkg_M5s82Zxc5KNKYGY-1749736807-1.0.1.1-34BsTXRfRzHwy_AQSfmaPauubHst69ssChyXXdHKwCrgyloO3DC3a82tcqTuhle6vZ_Rjre.dDW.seeljpPYGVoh_r.rRliYx1FgCbtXJLg",
       "domain": ".gibsondunn.com",
       "path": "/",
       "secure": true,
@@ -38,7 +38,7 @@
     },
     {
       "name": "PHPSESSID",
-      "value": "8051sjmiqumbl3e8snlkpfb9d5",
+      "value": "607vu6j3iatd2tmo3ajov4hlc1",
       "domain": "www.gibsondunn.com",
       "path": "/",
       "secure": false,
@@ -55,8 +55,17 @@
       "sameSite": "Lax"
     },
     {
+      "name": "cf_clearance",
+      "value": "aWibSlHffJWrW4BLVXuq2tYbXgXycRwLiQ4BsLePKlc-1749736808-1.2.1.1-ao1iNuEuNnqIEbR9f4D0PutcW5XxzDDvrrvat2SF.tL3ziiPvl8ORggO7.zbraFd9mkqeNc8CEUxfOL6bDXlc4KTbQKGXqPrngwQRnWzjSDoOEdsWT7f0lYq2tdo77iOuCuH7scP.Cn9mT5IklRj2MGUlS_SapHqzH3vErx0DUJtQuk6eefrFkL3SZsJNJticCaZM1.yMLQL1qELmu4eJHsOoHS_c2B3Oo0iVDm9sXPQtPgiKTDqh_k2r0ewTnk9gq.mf1YgXYAl0dw80BwP7TzaaMw.Mwi4uXu5kDA4BqOyesOWAueoBe9D9r6RZYmq2gbehBDmXMzqhMxuWf3U.UaxKsKID8zRkqMwnip9ufs",
+      "domain": ".gibsondunn.com",
+      "path": "/",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "None"
+    },
+    {
       "name": "wt_consent",
-      "value": "consentid:QXBNdXVZRnZWVm9RUkdmRjNVWmlTSXNEdU5SSnA4REE,consent:yes,action:yes,necessary:yes,functional:yes,analytics:yes,performance:yes,advertisement:yes,others:yes,consent_time:1749735091332",
+      "value": "consentid:SnlKbDEzdEpXN1pUeEVvVG5KdDg1ZHh6NFRIZDlvTmk,consent:yes,action:yes,necessary:yes,functional:yes,analytics:yes,performance:yes,advertisement:yes,others:yes,consent_time:1749736809119",
       "domain": "www.gibsondunn.com",
       "path": "/",
       "secure": false,
@@ -65,7 +74,7 @@
     },
     {
       "name": "_ga_NK6SF84HP0",
-      "value": "GS2.1.s1749735091$o1$g0$t1749735091$j60$l0$h0",
+      "value": "GS2.1.s1749736809$o1$g0$t1749736809$j60$l0$h0",
       "domain": ".gibsondunn.com",
       "path": "/",
       "secure": false,
@@ -74,7 +83,7 @@
     },
     {
       "name": "_ga",
-      "value": "GA1.1.1332594013.1749735092",
+      "value": "GA1.1.965064850.1749736810",
       "domain": ".gibsondunn.com",
       "path": "/",
       "secure": false,
@@ -83,7 +92,7 @@
     },
     {
       "name": "intEmailHistoryId",
-      "value": "-638652",
+      "value": "-638740",
       "domain": ".gibsondunn.vuture.net",
       "path": "/",
       "secure": true,
@@ -92,6 +101,48 @@
     }
   ],
   "elements": [
+    {
+      "label": "education",
+      "selector": "xpath:/html/body/div[4]/div/main/div/div[2]/div/div/div[2]/ul[2]/li[1]",
+      "selector_type": "xpath",
+      "element_type": "text",
+      "attribute_name": null,
+      "is_multiple": false,
+      "is_required": true,
+      "is_container": false,
+      "use_find_similar": false,
+      "sub_elements": [],
+      "follow_links": false,
+      "subpage_elements": []
+    },
+    {
+      "label": "credentials",
+      "selector": "xpath://*[text()='Egypt - Egypt Bar']",
+      "selector_type": "xpath",
+      "element_type": "text",
+      "attribute_name": null,
+      "is_multiple": false,
+      "is_required": true,
+      "is_container": false,
+      "use_find_similar": false,
+      "sub_elements": [],
+      "follow_links": false,
+      "subpage_elements": []
+    },
+    {
+      "label": "creds 2",
+      "selector": "xpath://*[text()='New York Bar']",
+      "selector_type": "xpath",
+      "element_type": "text",
+      "attribute_name": null,
+      "is_multiple": false,
+      "is_required": true,
+      "is_container": false,
+      "use_find_similar": false,
+      "sub_elements": [],
+      "follow_links": false,
+      "subpage_elements": []
+    },
     {
       "label": "main",
       "selector": "xpath:/html/body/div[4]/div/main/div/div[5]/div[1]",
@@ -123,27 +174,24 @@
           "element_type": "text",
           "attribute_name": null,
           "is_required": true
-        },
-        {
-          "label": "email",
-          "selector": "xpath:.//a[contains(@href, 'mailto:')]",
-          "element_type": "link",
-          "attribute_name": null,
-          "is_required": true
-        },
-        {
-          "label": "phone",
-          "selector": "xpath:.//a[contains(@href, 'tel:')]",
-          "element_type": "link",
-          "attribute_name": null,
-          "is_required": true
         }
       ],
       "follow_links": false,
       "subpage_elements": []
     }
   ],
-  "actions": [],
+  "actions": [
+    {
+      "label": "link",
+      "selector": "xpath://a[@href='https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/']",
+      "action_type": "click",
+      "wait_after": 2.0,
+      "target_url": "https://www.gibsondunn.com/lawyer/abdel-baky-mahmoud/",
+      "repeat_until_missing": false,
+      "repeat_until_no_change": false,
+      "max_repeats": null
+    }
+  ],
   "filters": [],
   "pagination": null,
   "enable_subpage_scraping": false,

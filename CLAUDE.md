@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RULES: 
 1) When a file size is greater than the token limit (over 600 lines of code), read the entire file by quarters.
 2) ALWAYS make backup files before making edits.
-
+3) Never edit any templates or outputs.
 ## Project Overview
 
 This is a production-ready interactive web scraping tool that combines visual element selection with automated data extraction. The tool enables users to create scraping templates by clicking on elements in a real browser, then execute those templates programmatically for large-scale data extraction.
