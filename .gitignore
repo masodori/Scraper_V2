@@ -132,3 +132,4 @@ templates/temp_*
 src/**/*.backup
 templates/backup_*
 *template*.json
+template.json
