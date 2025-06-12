@@ -33,7 +33,7 @@ A powerful web scraping tool that combines visual element selection with automat
    python -m venv venv
    source venv/bin/activate  # Windows: venv\Scripts\activate
    pip install -r requirements.txt
-   playwright install chromium
+   playwright install
    ```
 
 ### Create Your First Template
