@@ -25,16 +25,100 @@ from .scrapling_runner import ScraplingRunner
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('scraper.log'),
-        logging.StreamHandler()
+# Setup clean CLI with comprehensive file logging
+def setup_logging():
+    """Setup dual logging: clean CLI output + comprehensive file logging."""
+    
+    # Ensure logs directory exists
+    logs_dir = Path('logs')
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Create formatters
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    console_formatter = logging.Formatter('%(message)s')
+    
+    # Create handlers
+    file_handler = logging.FileHandler(logs_dir / 'scraper.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)  # Only show warnings/errors in console
+    console_handler.setFormatter(console_formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.handlers.clear()
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    # Configure specific loggers to be quieter on console
+    quiet_loggers = [
+        'playwright',
+        'scrapling',
+        'urllib3',
+        'requests',
+        'selenium',
+        'asyncio'
     ]
-)
-logger = logging.getLogger(__name__)
+    
+    for logger_name in quiet_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.WARNING)
+    
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+
+class ProgressIndicator:
+    """Clean progress indicators for CLI output."""
+    
+    @staticmethod
+    def print_header(title: str):
+        """Print a clean header."""
+        print(f"\n{Fore.MAGENTA}{'='*60}")
+        print(f"{Fore.MAGENTA}🕷️  {title}")
+        print(f"{Fore.MAGENTA}{'='*60}")
+    
+    @staticmethod
+    def print_step(step: str, details: str = ""):
+        """Print a step with clean formatting."""
+        if details:
+            print(f"{Fore.CYAN}▶ {step}: {Fore.WHITE}{details}")
+        else:
+            print(f"{Fore.CYAN}▶ {step}")
+    
+    @staticmethod
+    def print_success(message: str):
+        """Print success message."""
+        print(f"{Fore.GREEN}✅ {message}")
+    
+    @staticmethod
+    def print_error(message: str):
+        """Print error message."""
+        print(f"{Fore.RED}❌ {message}")
+    
+    @staticmethod
+    def print_warning(message: str):
+        """Print warning message."""
+        print(f"{Fore.YELLOW}⚠️  {message}")
+    
+    @staticmethod
+    def print_info(message: str):
+        """Print info message."""
+        print(f"{Fore.BLUE}ℹ️  {message}")
+    
+    @staticmethod
+    def print_result(filepath: str, file_type: str = "file"):
+        """Print result file location."""
+        print(f"{Fore.GREEN}📁 {file_type.title()} saved: {Fore.WHITE}{filepath}")
+
+
+logger = setup_logging()
 
 
 class InteractiveSession:
@@ -57,8 +141,9 @@ class InteractiveSession:
         Returns:
             Path to the saved template file
         """
-        print(f"{Fore.CYAN}🚀 Starting interactive session for: {url}")
-        print(f"{Fore.YELLOW}📝 Output template: {output_file}")
+        ProgressIndicator.print_header("Interactive Template Creation")
+        ProgressIndicator.print_step("Target URL", url)
+        ProgressIndicator.print_step("Output template", output_file)
         
         template_path = os.path.join('templates', output_file)
         
@@ -91,7 +176,7 @@ class InteractiveSession:
                 viewport_width = min(width - 200, 1400)
                 viewport_height = min(height - 200, 900)
                 
-                print(f"{Fore.BLUE}🖥️  Setting browser size: {viewport_width}x{viewport_height} (screen: {width}x{height})")
+                ProgressIndicator.print_step("Setting browser size", f"{viewport_width}x{viewport_height}")
                 
                 # Launch browser with stealth settings and proper window size
                 browser_args = [
@@ -197,13 +282,12 @@ class InteractiveSession:
                 # Inject the interactive overlay
                 self.page.evaluate(js_code)
                 
-                print(f"{Fore.GREEN}✅ Interactive session started!")
-                print(f"{Fore.YELLOW}📋 Instructions:")
-                print(f"{Fore.WHITE}  • Use 'Elements' tab to select data to scrape")
-                print(f"{Fore.WHITE}  • Use 'Actions' tab to select navigation elements")
-                print(f"{Fore.WHITE}  • In Action mode, click to navigate to links")
-                print(f"{Fore.WHITE}  • Click 'Save Template' when finished")
-                print(f"{Fore.WHITE}  • Close the browser or press Ctrl+C to exit")
+                ProgressIndicator.print_success("Interactive session started!")
+                ProgressIndicator.print_info("Use the browser overlay to:")
+                print(f"{Fore.WHITE}  • 📋 Select elements with 'Containers' and 'Elements' tabs")
+                print(f"{Fore.WHITE}  • 🔗 Add navigation with 'Actions' tab")
+                print(f"{Fore.WHITE}  • 💾 Click 'Save Template' when finished")
+                print(f"{Fore.WHITE}  • ❌ Close browser or press Ctrl+C to exit")
                 
                 # Wait for user interaction or navigation
                 try:
@@ -330,7 +414,7 @@ class InteractiveSession:
         try:
             element = json.loads(element_data)
             self.template_data['elements'].append(element)
-            print(f"{Fore.GREEN}✅ Added element: {element.get('label', 'unknown')}")
+            logger.info(f"Added element: {element.get('label', 'unknown')}")
         except json.JSONDecodeError as e:
             logger.error(f"Error parsing element data: {e}")
     
@@ -339,13 +423,13 @@ class InteractiveSession:
         try:
             action = json.loads(action_data)
             self.template_data['actions'].append(action)
-            print(f"{Fore.GREEN}✅ Added action: {action.get('label', 'unknown')}")
+            logger.info(f"Added action: {action.get('label', 'unknown')}")
         except json.JSONDecodeError as e:
             logger.error(f"Error parsing action data: {e}")
     
     def _log_message_callback(self, message: str) -> None:
         """Callback to log messages from JavaScript."""
-        print(f"{Fore.CYAN}🔍 Browser: {message}")
+        logger.debug(f"Browser: {message}")
     
     def _navigate_to_callback(self, url: str) -> None:
         """Callback to handle navigation requests from JavaScript."""
@@ -402,7 +486,8 @@ def run_scraper(template_file: str, output_file: Optional[str] = None, format: s
     Returns:
         Path to the output file
     """
-    print(f"{Fore.CYAN}🤖 Running automated scraper with template: {template_file}")
+    ProgressIndicator.print_header("Automated Scraping Execution")
+    ProgressIndicator.print_step("Loading template", template_file)
     
     try:
         # Validate template file exists
@@ -411,14 +496,16 @@ def run_scraper(template_file: str, output_file: Optional[str] = None, format: s
         
         # Load and validate template
         template = ScrapingTemplate.load_from_file(template_file)
-        print(f"{Fore.GREEN}✅ Template loaded: {template.name}")
-        print(f"{Fore.BLUE}🎯 Target URL: {template.url}")
-        print(f"{Fore.BLUE}📊 Elements to scrape: {len(template.elements)}")
+        ProgressIndicator.print_step("Template", template.name)
+        ProgressIndicator.print_step("Target URL", template.url)
+        ProgressIndicator.print_step("Elements to scrape", str(len(template.elements)))
         
         # Initialize the Scrapling runner
+        ProgressIndicator.print_step("Initializing scraper")
         runner = ScraplingRunner(template)
         
         # Execute scraping
+        ProgressIndicator.print_step("Starting scraping process")
         result = runner.execute_scraping()
         
         if result.success:
@@ -440,21 +527,24 @@ def run_scraper(template_file: str, output_file: Optional[str] = None, format: s
             # Export data in requested format
             runner.export_data(result, output_file, format)
             
-            print(f"{Fore.GREEN}✅ Scraping completed successfully!")
-            print(f"{Fore.GREEN}📁 Output file: {output_file}")
-            print(f"{Fore.GREEN}📊 Records scraped: {len(result.data) if isinstance(result.data, list) else 1}")
+            ProgressIndicator.print_success("Scraping completed successfully!")
+            ProgressIndicator.print_result(output_file, "Output")
+            
+            # Calculate record count
+            record_count = len(result.data) if isinstance(result.data, list) else 1
+            ProgressIndicator.print_step("Records scraped", str(record_count))
             
             return output_file
             
         else:
-            print(f"{Fore.RED}❌ Scraping failed!")
+            ProgressIndicator.print_error("Scraping failed!")
             for error in result.errors:
                 print(f"{Fore.RED}   • {error}")
             return ""
             
     except Exception as e:
         logger.error(f"Error running scraper: {e}")
-        print(f"{Fore.RED}❌ Error: {e}")
+        ProgressIndicator.print_error(f"Error: {e}")
         return ""
 
 
@@ -463,17 +553,16 @@ def list_templates() -> None:
     templates_dir = "templates"
     
     if not os.path.exists(templates_dir):
-        print(f"{Fore.YELLOW}⚠️ No templates directory found")
+        ProgressIndicator.print_warning("No templates directory found")
         return
     
     template_files = [f for f in os.listdir(templates_dir) if f.endswith('.json')]
     
     if not template_files:
-        print(f"{Fore.YELLOW}⚠️ No templates found in {templates_dir}")
+        ProgressIndicator.print_warning(f"No templates found in {templates_dir}")
         return
     
-    print(f"{Fore.CYAN}📋 Available Templates:")
-    print(f"{Fore.CYAN}{'='*50}")
+    ProgressIndicator.print_header("Available Templates")
     
     for template_file in sorted(template_files):
         try:
@@ -488,7 +577,7 @@ def list_templates() -> None:
             print()
             
         except Exception as e:
-            print(f"{Fore.RED}❌ Error loading {template_file}: {e}")
+            ProgressIndicator.print_error(f"Error loading {template_file}: {e}")
 
 
 def main():
@@ -564,10 +653,7 @@ Examples:
     args = parser.parse_args()
     
     # Print banner
-    print(f"{Fore.MAGENTA}{'='*60}")
-    print(f"{Fore.MAGENTA}🕷️  Interactive Web Scraper v2.0")
-    print(f"{Fore.MAGENTA}   Playwright + Scrapling Integration")
-    print(f"{Fore.MAGENTA}{'='*60}")
+    ProgressIndicator.print_header("Interactive Web Scraper v2.0 - Playwright + Scrapling")
     print()
     
     try:
@@ -575,8 +661,8 @@ Examples:
             result = start_interactive_session(args.url, args.output, args.headless)
             if result:
                 print(f"\n{Fore.GREEN}🎉 Interactive session completed successfully!")
-                print(f"{Fore.BLUE}📄 Template saved: {result}")
-                print(f"{Fore.YELLOW}💡 Next step: Run 'python -m src.core.main scrape {result}' to test your template")
+                ProgressIndicator.print_result(result, "Template")
+                ProgressIndicator.print_info(f"Next: Run 'python -m src.core.main scrape {result}'")
             else:
                 sys.exit(1)
                 
@@ -584,7 +670,7 @@ Examples:
             result = run_scraper(args.template, args.output, args.format)
             if result:
                 print(f"\n{Fore.GREEN}🎉 Scraping completed successfully!")
-                print(f"{Fore.BLUE}📁 Output: {result}")
+                ProgressIndicator.print_result(result, "Data")
             else:
                 sys.exit(1)
                 

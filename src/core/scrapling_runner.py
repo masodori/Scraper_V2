@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scrapling.fetchers import PlayWrightFetcher, StealthyFetcher
 from scrapling import Adaptor
+from colorama import Fore
 
 from ..models.scraping_template import ScrapingTemplate, ScrapingResult, ElementSelector, NavigationAction, CookieData
 
@@ -154,6 +155,8 @@ class ScraplingRunner:
             }
             
             logger.info(f"Scraping completed successfully. Found {result.metadata['elements_found']} elements.")
+            # Only show major progress in console
+            print(f"{Fore.GREEN}▶ Extracted data from {result.metadata['elements_found']} element(s)")
             
         except Exception as e:
             error_msg = f"Scraping failed: {str(e)}"
@@ -718,7 +721,9 @@ class ScraplingRunner:
             # Strategy 4: Structure-based selection
             lambda: self._try_structure_based_selection(element),
             # Strategy 5: Original selector as fallback
-            lambda: self._try_original_selector(element)
+            lambda: self._try_original_selector(element),
+            # Strategy 6: Fuzzy matching with variations
+            lambda: self._try_fuzzy_matching(element)
         ]
         
         for i, strategy in enumerate(strategies):
@@ -756,22 +761,253 @@ class ScraplingRunner:
         return []
     
     def _try_content_based_selection(self, element: ElementSelector) -> List:
-        """Try to find elements based on content patterns."""
-        if element.element_type == 'text' and hasattr(element, 'expected_pattern'):
-            # Look for elements containing expected text patterns
-            content_xpaths = [
-                f"//*[contains(text(), '{pattern}')]" 
-                for pattern in getattr(element, 'expected_patterns', [])
-            ]
+        """Try to find elements based on content patterns with intelligent matching."""
+        import re
+        
+        try:
+            # Enhanced pattern matching based on element label
+            label = element.label.lower()
             
-            for xpath in content_xpaths:
+            # Credential/Bar admission patterns
+            if any(keyword in label for keyword in ['cred', 'admission', 'bar', 'license']):
+                return self._find_credentials_intelligently()
+            
+            # Education patterns
+            elif 'education' in label:
+                return self._find_education_intelligently()
+                
+            # Position/Title patterns
+            elif any(keyword in label for keyword in ['position', 'title', 'role']):
+                return self._find_position_intelligently()
+                
+            # Contact patterns
+            elif any(keyword in label for keyword in ['email', 'phone', 'contact']):
+                return self._find_contact_intelligently(label)
+                
+            # Generic text pattern matching
+            else:
+                return self._find_generic_text_patterns(element)
+                
+        except Exception as e:
+            logger.debug(f"Content-based selection failed: {e}")
+            return []
+    
+    def _find_credentials_intelligently(self) -> List:
+        """Find credential/bar admission information using multiple intelligent strategies."""
+        strategies = [
+            # Strategy 1: Look for common bar patterns
+            lambda: self.current_page.xpath("//*[contains(text(), 'Bar') or contains(text(), 'bar')]"),
+            # Strategy 2: Look for state/country - credential patterns  
+            lambda: self.current_page.xpath("//*[contains(text(), ' - ') and (contains(text(), 'Bar') or contains(text(), 'Court') or contains(text(), 'License'))]"),
+            # Strategy 3: Look in credential/admission sections
+            lambda: self.current_page.css(".admissions *, .credentials *, .bar *, .license *"),
+            # Strategy 4: Look for list items with credential patterns
+            lambda: self.current_page.xpath("//li[contains(text(), 'Bar') or contains(text(), 'Court') or contains(text(), 'License') or contains(text(), 'Admission')]"),
+            # Strategy 5: Pattern matching for common formats
+            lambda: self._find_by_credential_patterns(),
+            # Strategy 6: Look in common structural locations
+            lambda: self.current_page.css(".bio *, .profile *, .details *").filter(lambda x: self._contains_credential_keywords(x))
+        ]
+        
+        for strategy in strategies:
+            try:
+                elements = strategy()
+                if elements:
+                    # Filter to most relevant credential elements
+                    filtered = self._filter_credential_elements(elements)
+                    if filtered:
+                        logger.debug(f"Found {len(filtered)} credential elements")
+                        return filtered
+            except Exception as e:
+                logger.debug(f"Credential strategy failed: {e}")
+                continue
+        
+        return []
+    
+    def _find_by_credential_patterns(self) -> List:
+        """Find credentials using regex patterns for common formats."""
+        import re
+        
+        # Common credential patterns
+        patterns = [
+            r'\w+\s*-\s*\w*Bar\w*',  # "State - Bar", "Country - Bar Association"
+            r'\w+\s*Bar\s*\w*',      # "State Bar", "Bar Association"
+            r'\w+\s*Court\s*\w*',    # "Supreme Court", "High Court"
+            r'\w+\s*License\w*',     # "State License", "Professional License"
+            r'\w+\s*Admission\w*'    # "Bar Admission", "Court Admission"
+        ]
+        
+        found_elements = []
+        
+        try:
+            # Get all text elements on page
+            all_text_elements = self.current_page.css("*").filter(lambda x: hasattr(x, 'text') and x.text and x.text.strip())
+            
+            for element in all_text_elements:
+                text = element.text.strip()
+                for pattern in patterns:
+                    if re.search(pattern, text, re.IGNORECASE):
+                        found_elements.append(element)
+                        break
+                        
+        except Exception as e:
+            logger.debug(f"Pattern matching failed: {e}")
+            
+        return found_elements
+    
+    def _contains_credential_keywords(self, element) -> bool:
+        """Check if element contains credential-related keywords."""
+        if not hasattr(element, 'text') or not element.text:
+            return False
+            
+        text = element.text.lower()
+        keywords = ['bar', 'court', 'license', 'admission', 'attorney', 'solicitor', 'barrister']
+        return any(keyword in text for keyword in keywords)
+    
+    def _filter_credential_elements(self, elements) -> List:
+        """Filter elements to return most relevant credential information."""
+        if not elements:
+            return []
+            
+        # Score elements based on credential relevance
+        scored_elements = []
+        
+        for element in elements:
+            score = 0
+            if hasattr(element, 'text') and element.text:
+                text = element.text.lower()
+                
+                # Higher score for more specific credential terms
+                if 'bar' in text: score += 3
+                if 'court' in text: score += 3
+                if 'license' in text: score += 2
+                if 'admission' in text: score += 2
+                if ' - ' in text: score += 2  # Common format: "State - Bar"
+                if any(state in text for state in ['california', 'new york', 'texas', 'florida', 'egypt', 'england']): score += 1
+                
+                # Penalize very long text (likely not specific credentials)
+                if len(text) > 200: score -= 2
+                
+                scored_elements.append((score, element))
+        
+        # Sort by score and return top elements
+        scored_elements.sort(key=lambda x: x[0], reverse=True)
+        return [elem for score, elem in scored_elements if score > 0][:5]  # Top 5 most relevant
+    
+    def _find_education_intelligently(self) -> List:
+        """Find education information using intelligent strategies."""
+        strategies = [
+            lambda: self.current_page.css(".education li, .education p, .education div"),
+            lambda: self.current_page.css(".is-style-no-bullets li"),
+            lambda: self.current_page.xpath("//li[contains(text(), 'University') or contains(text(), 'College') or contains(text(), 'School')]"),
+            lambda: self.current_page.css("*").filter(lambda x: self._contains_education_keywords(x))
+        ]
+        
+        for strategy in strategies:
+            try:
+                elements = strategy()
+                if elements:
+                    return elements[:10]  # Limit to reasonable number
+            except Exception:
+                continue
+        return []
+    
+    def _contains_education_keywords(self, element) -> bool:
+        """Check if element contains education-related keywords."""
+        if not hasattr(element, 'text') or not element.text:
+            return False
+            
+        text = element.text.lower()
+        keywords = ['university', 'college', 'school', 'degree', 'bachelor', 'master', 'phd', 'law school']
+        return any(keyword in text for keyword in keywords)
+    
+    def _find_position_intelligently(self) -> List:
+        """Find position/title information using intelligent strategies."""
+        strategies = [
+            lambda: self.current_page.css(".title, .position, .role, .designation"),
+            lambda: self.current_page.xpath("//span[contains(@class, 'title') or contains(@class, 'position')]"),
+            lambda: self.current_page.css("*").filter(lambda x: self._contains_position_keywords(x))
+        ]
+        
+        for strategy in strategies:
+            try:
+                elements = strategy()
+                if elements:
+                    return elements[:5]
+            except Exception:
+                continue
+        return []
+    
+    def _contains_position_keywords(self, element) -> bool:
+        """Check if element contains position-related keywords."""
+        if not hasattr(element, 'text') or not element.text:
+            return False
+            
+        text = element.text.lower()
+        keywords = ['partner', 'associate', 'counsel', 'director', 'manager', 'attorney', 'lawyer']
+        return any(keyword in text for keyword in keywords)
+    
+    def _find_contact_intelligently(self, label: str) -> List:
+        """Find contact information using intelligent strategies."""
+        if 'email' in label:
+            strategies = [
+                lambda: self.current_page.css("a[href^='mailto:']"),
+                lambda: self.current_page.css(".email, .contact-email"),
+                lambda: self.current_page.xpath("//*[contains(@href, '@') or contains(text(), '@')]"),
+            ]
+        elif 'phone' in label:
+            strategies = [
+                lambda: self.current_page.css("a[href^='tel:']"),
+                lambda: self.current_page.css(".phone, .contact-phone"),
+                lambda: self.current_page.xpath("//*[contains(@href, 'tel:') or contains(text(), '+') or contains(text(), '(')]"),
+            ]
+        else:
+            return []
+            
+        for strategy in strategies:
+            try:
+                elements = strategy()
+                if elements:
+                    return elements[:3]
+            except Exception:
+                continue
+        return []
+    
+    def _find_generic_text_patterns(self, element: ElementSelector) -> List:
+        """Find elements using generic text pattern matching."""
+        # Extract potential keywords from original selector
+        keywords = self._extract_keywords_from_selector(element.selector)
+        
+        if keywords:
+            for keyword in keywords:
                 try:
-                    elements = self.current_page.xpath(xpath)
+                    elements = self.current_page.xpath(f"//*[contains(text(), '{keyword}')]") 
                     if elements:
-                        return elements
+                        return elements[:5]
                 except Exception:
                     continue
+        
         return []
+    
+    def _extract_keywords_from_selector(self, selector: str) -> List[str]:
+        """Extract meaningful keywords from a selector."""
+        import re
+        
+        keywords = []
+        
+        # Extract from contains() functions
+        contains_matches = re.findall(r"contains\([^,]+,\s*['\"]([^'\"]+)['\"]\)", selector)
+        keywords.extend(contains_matches)
+        
+        # Extract class names
+        class_matches = re.findall(r"@class\s*=\s*['\"]([^'\"]+)['\"]", selector)
+        keywords.extend(class_matches)
+        
+        # Extract ID values
+        id_matches = re.findall(r"@id\s*=\s*['\"]([^'\"]+)['\"]", selector)
+        keywords.extend(id_matches)
+        
+        return [k for k in keywords if len(k) > 2]  # Filter out very short keywords
     
     def _try_structure_based_selection(self, element: ElementSelector) -> List:
         """Try to find elements based on structural patterns."""
@@ -796,6 +1032,83 @@ class ScraplingRunner:
         except Exception:
             pass
         return []
+    
+    def _try_fuzzy_matching(self, element: ElementSelector) -> List:
+        """Try fuzzy matching with selector variations."""
+        try:
+            original_selector = element.selector
+            variations = self._generate_selector_variations(original_selector)
+            
+            for variation in variations:
+                try:
+                    if element.selector_type == 'xpath':
+                        elements = self.current_page.xpath(variation, auto_match=True)
+                    else:
+                        elements = self.current_page.css(variation, auto_match=True)
+                    
+                    if elements:
+                        logger.debug(f"Fuzzy matching successful with: {variation}")
+                        return elements
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"Fuzzy matching failed: {e}")
+            
+        return []
+    
+    def _generate_selector_variations(self, selector: str) -> List[str]:
+        """Generate variations of a selector for fuzzy matching."""
+        variations = []
+        
+        try:
+            # For XPath selectors with specific text content
+            if 'contains(text(),' in selector:
+                import re
+                # Extract the text being searched for
+                text_matches = re.findall(r"contains\(text\(\),\s*['\"]([^'\"]+)['\"]\)", selector)
+                
+                for text in text_matches:
+                    # Create more flexible variations
+                    if ' - ' in text:  # Handle "Country - Bar" patterns
+                        parts = text.split(' - ')
+                        if len(parts) == 2:
+                            # Try variations like "Country Bar", "Bar", etc.
+                            variations.extend([
+                                selector.replace(text, parts[1]),  # Just "Bar"
+                                selector.replace(text, f"{parts[0]} {parts[1]}"),  # "Country Bar"
+                                selector.replace(text, parts[1].replace('Bar', 'bar')),  # lowercase
+                                f"//*[contains(text(), '{parts[1]}')]",  # Simple xpath for just the credential type
+                            ])
+                    
+                    # Try partial matches
+                    words = text.split()
+                    for word in words:
+                        if len(word) > 3:  # Skip short words
+                            variations.append(f"//*[contains(text(), '{word}')]")
+                    
+                    # Try case variations
+                    variations.extend([
+                        selector.replace(text, text.lower()),
+                        selector.replace(text, text.upper()),
+                        selector.replace(text, text.title())
+                    ])
+            
+            # For structural selectors, try making them more flexible
+            if 'xpath:' in selector:
+                base_selector = selector.replace('xpath:', '')
+                # Try removing position-specific parts
+                variations.extend([
+                    base_selector.replace('[1]', ''),
+                    base_selector.replace('[2]', ''),
+                    base_selector.replace('//*', '//'),
+                    f"({base_selector})[1]",  # Wrap in parentheses and get first
+                ])
+                
+        except Exception as e:
+            logger.debug(f"Error generating selector variations: {e}")
+            
+        return list(set(variations))  # Remove duplicates
     
     def _generate_semantic_xpaths(self, element: ElementSelector) -> List[str]:
         """

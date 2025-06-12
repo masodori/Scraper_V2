@@ -130,3 +130,5 @@ Thumbs.db
 templates/*.json.bak
 templates/temp_*
 src/**/*.backup
+templates/backup_*
+*template*.json

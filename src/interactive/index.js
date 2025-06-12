@@ -1690,13 +1690,245 @@
         },
         
         findSimilarElements: function(element) {
-            const selector = SelectorGenerator.generate(element);
-            try {
-                return Array.from(document.querySelectorAll(selector));
-            } catch (error) {
-                console.error('Error finding similar elements:', error);
-                return [element];
+            // Try multiple strategies to find similar container elements
+            const strategies = [
+                // Strategy 1: Use original generated selector
+                () => this.findElementsWithSelector(SelectorGenerator.generate(element)),
+                // Strategy 2: Use parent-based pattern detection
+                () => this.findSimilarByParentPattern(element),
+                // Strategy 3: Use class-based similarity
+                () => this.findSimilarByClasses(element),
+                // Strategy 4: Use structural similarity
+                () => this.findSimilarByStructure(element),
+                // Strategy 5: Use semantic similarity (for lawyer cards, profiles, etc.)
+                () => this.findSimilarBySemantic(element)
+            ];
+            
+            for (const strategy of strategies) {
+                try {
+                    const elements = strategy();
+                    if (elements && elements.length > 1) {
+                        console.log(`Found ${elements.length} similar elements using container detection strategy`);
+                        return elements;
+                    }
+                } catch (error) {
+                    console.debug('Container detection strategy failed:', error);
+                    continue;
+                }
             }
+            
+            // Fallback to single element
+            console.warn('Could not find multiple similar elements, falling back to single element');
+            return [element];
+        },
+        
+        findElementsWithSelector: function(selector) {
+            try {
+                if (selector.startsWith('xpath:')) {
+                    const xpath = selector.replace('xpath:', '');
+                    const result = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                    const elements = [];
+                    for (let i = 0; i < result.snapshotLength; i++) {
+                        elements.push(result.snapshotItem(i));
+                    }
+                    return elements;
+                } else {
+                    return Array.from(document.querySelectorAll(selector));
+                }
+            } catch (error) {
+                console.error('Error with selector:', selector, error);
+                return [];
+            }
+        },
+        
+        findSimilarByParentPattern: function(element) {
+            // Look for elements with similar parent structure
+            const parent = element.parentElement;
+            if (!parent) return [];
+            
+            // Find all children of the same parent with the same tag
+            const siblings = Array.from(parent.children).filter(child => 
+                child.tagName === element.tagName
+            );
+            
+            if (siblings.length > 1) {
+                return siblings;
+            }
+            
+            // Try finding elements with similar parent classes across the page
+            if (parent.className) {
+                const parentClasses = parent.className.trim().split(/\s+/)
+                    .filter(cls => cls && !this.isGenericClass(cls));
+                    
+                if (parentClasses.length > 0) {
+                    const parentSelector = `.${parentClasses.join('.')}`;
+                    const similarParents = document.querySelectorAll(parentSelector);
+                    
+                    const allSimilarElements = [];
+                    similarParents.forEach(similarParent => {
+                        const childrenWithSameTag = Array.from(similarParent.children)
+                            .filter(child => child.tagName === element.tagName);
+                        allSimilarElements.push(...childrenWithSameTag);
+                    });
+                    
+                    if (allSimilarElements.length > 1) {
+                        return allSimilarElements;
+                    }
+                }
+            }
+            
+            return [];
+        },
+        
+        findSimilarByClasses: function(element) {
+            if (!element.className) return [];
+            
+            const classes = element.className.trim().split(/\s+/)
+                .filter(cls => cls && !this.isGenericClass(cls));
+                
+            if (classes.length === 0) return [];
+            
+            // Try different combinations of classes
+            const classSelectors = [
+                `.${classes.join('.')}`, // All classes
+                ...classes.map(cls => `.${cls}`) // Individual classes
+            ];
+            
+            for (const selector of classSelectors) {
+                try {
+                    const elements = Array.from(document.querySelectorAll(selector));
+                    if (elements.length > 1 && elements.length < 100) {
+                        return elements;
+                    }
+                } catch (error) {
+                    continue;
+                }
+            }
+            
+            return [];
+        },
+        
+        findSimilarByStructure: function(element) {
+            // Look for elements with similar structure (same tag, similar children)
+            const tagName = element.tagName;
+            const childTags = Array.from(element.children).map(child => child.tagName);
+            
+            // Find all elements with same tag
+            const sameTagElements = Array.from(document.querySelectorAll(tagName));
+            
+            // Filter by similar structure
+            const structurallySimilar = sameTagElements.filter(el => {
+                if (el === element) return true;
+                
+                const elChildTags = Array.from(el.children).map(child => child.tagName);
+                
+                // Check if they have similar child structure
+                if (childTags.length > 0 && elChildTags.length > 0) {
+                    const intersection = childTags.filter(tag => elChildTags.includes(tag));
+                    const similarity = intersection.length / Math.max(childTags.length, elChildTags.length);
+                    return similarity > 0.5; // 50% structural similarity
+                }
+                
+                return false;
+            });
+            
+            if (structurallySimilar.length > 1) {
+                return structurallySimilar;
+            }
+            
+            return [];
+        },
+        
+        findSimilarBySemantic: function(element) {
+            // Look for semantic patterns common in professional directories
+            const tagName = element.tagName.toLowerCase();
+            
+            // Patterns for lawyer/professional profile cards
+            const patterns = [
+                // Look for cards/profiles that contain name-like text
+                `${tagName}:has(strong, h2, h3, .name, [class*="name"])`,
+                // Look for cards with contact information
+                `${tagName}:has(a[href*="mailto"], a[href*="tel"], [class*="email"], [class*="phone"])`,
+                // Look for cards with professional titles
+                `${tagName}:has([class*="title"], [class*="position"], [class*="role"])`,
+                // Generic card patterns
+                `${tagName}[class*="card"]`,
+                `${tagName}[class*="item"]`,
+                `${tagName}[class*="profile"]`,
+                `${tagName}[class*="person"]`,
+                `${tagName}[class*="lawyer"]`,
+                `${tagName}[class*="attorney"]`,
+                `${tagName}[class*="member"]`
+            ];
+            
+            for (const pattern of patterns) {
+                try {
+                    const elements = Array.from(document.querySelectorAll(pattern));
+                    if (elements.length > 1 && elements.includes(element)) {
+                        return elements;
+                    }
+                } catch (error) {
+                    // CSS selector might not be supported, continue to next pattern
+                    continue;
+                }
+            }
+            
+            // Fallback: look for elements with similar text patterns (names, titles)
+            const text = element.textContent?.trim();
+            if (text) {
+                // Look for elements that contain professional titles
+                const titleWords = ['partner', 'associate', 'counsel', 'attorney', 'lawyer', 'director'];
+                const hasTitle = titleWords.some(title => text.toLowerCase().includes(title));
+                
+                if (hasTitle) {
+                    const allElements = Array.from(document.querySelectorAll(tagName));
+                    const withTitles = allElements.filter(el => {
+                        const elText = el.textContent?.trim().toLowerCase() || '';
+                        return titleWords.some(title => elText.includes(title));
+                    });
+                    
+                    if (withTitles.length > 1) {
+                        return withTitles;
+                    }
+                }
+                
+                // Look for elements with name-like patterns (capitalized words)
+                const namePattern = /^[A-Z][a-z]+(\s+[A-Z][a-z]+)+/;
+                if (namePattern.test(text)) {
+                    const allElements = Array.from(document.querySelectorAll(tagName));
+                    const withNames = allElements.filter(el => {
+                        const elText = el.textContent?.trim() || '';
+                        return namePattern.test(elText);
+                    });
+                    
+                    if (withNames.length > 1) {
+                        return withNames;
+                    }
+                }
+            }
+            
+            return [];
+        },
+        
+        isGenericClass: function(className) {
+            // List of generic class names that are not useful for identification
+            const genericClasses = [
+                'container', 'wrapper', 'content', 'main', 'section', 
+                'row', 'col', 'column', 'grid', 'flex', 'block', 'inline',
+                'left', 'right', 'center', 'top', 'bottom', 'middle',
+                'small', 'medium', 'large', 'big', 'tiny',
+                'primary', 'secondary', 'tertiary', 'default',
+                'active', 'inactive', 'disabled', 'enabled',
+                'visible', 'hidden', 'show', 'hide',
+                'red', 'blue', 'green', 'yellow', 'black', 'white',
+                'margin', 'padding', 'border', 'background',
+                'text', 'font', 'bold', 'italic', 'underline'
+            ];
+            return genericClasses.includes(className.toLowerCase()) || 
+                   className.length < 3 ||
+                   /^(m|p|pt|pb|pl|pr|mt|mb|ml|mr)-?\d+$/.test(className) || // Bootstrap/Tailwind spacing
+                   /^col-\d+/.test(className) || // Bootstrap columns
+                   /^(xs|sm|md|lg|xl)-/.test(className); // Responsive classes
         }
     };
     
