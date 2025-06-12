@@ -352,12 +352,6 @@ playwright install chromium
 - **Pydantic**: Data validation and settings
 - **Pandas**: Data processing and export
 
-## 📞 Support
-
-- Check `CLAUDE.md` for detailed implementation guidance
-- Review `GIBSON_DUNN_WORKFLOW.md` for container workflow examples
-- Examine templates in `templates/` directory for working examples
-
 ---
 
 **Built for efficiency, designed for scale** 🚀
