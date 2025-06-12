@@ -247,10 +247,8 @@ Scraper_V2/
 ├── 📁 templates/                        # Generated JSON templates
 │   └── template.json                    # Example/current template
 ├── 📁 output/                           # Scraped data files (JSON/CSV/Excel)
-│   ├── gibsondunn.com_*_*.json          # Sample output files
 │   └── ...                              # Additional scraped data
 ├── 📁 examples/                         # Example scripts & demonstrations
-│   └── gibson_dunn_demo.py              # Gibson Dunn scraping demo
 ├── 📁 tests/                            # Test suite
 │   ├── __init__.py                      # Package initialization
 │   ├── test_models.py                   # Template model tests
