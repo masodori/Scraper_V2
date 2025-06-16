@@ -247,16 +247,13 @@ Scraper_V2/
 ├── 📁 templates/                        # Generated JSON templates
 │   └── template.json                    # Example/current template
 ├── 📁 output/                           # Scraped data files (JSON/CSV/Excel)
-│   ├── gibsondunn.com_*_*.json          # Sample output files
 │   └── ...                              # Additional scraped data
 ├── 📁 examples/                         # Example scripts & demonstrations
-│   └── gibson_dunn_demo.py              # Gibson Dunn scraping demo
 ├── 📁 tests/                            # Test suite
 │   ├── __init__.py                      # Package initialization
 │   ├── test_models.py                   # Template model tests
 │   └── test_scrapling_runner.py         # Scraping engine tests
 ├── 📄 requirements.txt                  # Python dependencies
-├── 📄 CLAUDE.md                         # Claude Code guidance & project rules
 ├── 📄 README.md                         # This file - project documentation
 ├── 📄 quick_test.py                     # Quick testing script
 ├── 📄 test_*.py                         # Additional test scripts
@@ -354,12 +351,6 @@ playwright install chromium
 - **Playwright**: Browser automation for interactive sessions
 - **Pydantic**: Data validation and settings
 - **Pandas**: Data processing and export
-
-## 📞 Support
-
-- Check `CLAUDE.md` for detailed implementation guidance
-- Review `GIBSON_DUNN_WORKFLOW.md` for container workflow examples
-- Examine templates in `templates/` directory for working examples
 
 ---
 
