@@ -1,10 +1,13 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-RULES: 
-1) When a file size is greater than the token limit (over 600 lines of code), read the entire file by quarters.
-2) ALWAYS make backup files before making edits.
-3) Never edit any templates or outputs.
+ 
+### Memory RULES: Web Scraping Best Practices
+
+1) **When a file size is greater than the token limit (over 600 lines of code), read the entire file by quarters.**
+2) **ALWAYS make backup files before making edits.**
+3) **Never edit any templates or outputs.**
+4) **NEVER hard code or make something code-wise that is for a specific webpage.**
 ## Project Overview
 
 This is a production-ready interactive web scraping tool that combines visual element selection with automated data extraction. The tool enables users to create scraping templates by clicking on elements in a real browser, then execute those templates programmatically for large-scale data extraction.
@@ -69,21 +72,62 @@ python test_working_template.py
 
 ### Clean Project Structure
 ```
-src/
-├── core/
-│   ├── main.py              # CLI entry point and session management
-│   ├── cli.py               # Simplified command-line interface
-│   ├── interactive_cli.py   # Interactive CLI utilities
-│   └── scrapling_runner.py  # Scrapling integration for automated scraping
-├── interactive/
-│   └── interactive_session.js  # Browser overlay for element selection
-└── models/
-    └── scraping_template.py    # Pydantic data models and validation
-templates/                   # Generated JSON templates
-output/                     # Scraped data files
-tests/                      # Test suite
-examples/                   # Example scripts and demonstrations
-logs/                       # Application logs
+Scraper_V2/
+├── 📁 src/                              # Main source code
+│   ├── 📁 core/                         # Core scraping functionality
+│   │   ├── __init__.py                  # Package initialization
+│   │   ├── __main__.py                  # Module entry point
+│   │   ├── cli.py                       # Command-line interface
+│   │   ├── interactive_cli.py           # Interactive CLI utilities
+│   │   ├── main.py                      # Session management & Playwright integration
+│   │   └── scrapling_runner.py          # Automated scraping execution engine
+│   ├── 📁 interactive/                  # Browser-based interactive system
+│   │   ├── __init__.py                  # Package initialization
+│   │   ├── index.js                     # Main entry point & orchestration
+│   │   ├── 📁 core/                     # Core interactive functionality
+│   │   │   ├── config.js                # Configuration constants
+│   │   │   ├── error-handler.js         # Error handling utilities
+│   │   │   ├── event-manager.js         # Event delegation & handling
+│   │   │   └── state-manager.js         # Centralized state management
+│   │   ├── 📁 navigation/               # Navigation & session management
+│   │   │   └── state-persistence.js     # Save/restore session state
+│   │   ├── 📁 selectors/                # CSS selector generation
+│   │   │   └── selector-generator.js    # Smart CSS selector creation
+│   │   ├── 📁 tools/                    # Interactive selection tools
+│   │   │   ├── base-tool.js             # Base tool interface
+│   │   │   ├── element-tool.js          # Element selection functionality
+│   │   │   ├── action-tool.js           # Action selection & handling
+│   │   │   ├── container-tool.js        # Container selection logic (⭐ power feature)
+│   │   │   └── scroll-tool.js           # Scroll/pagination handling
+│   │   ├── 📁 ui/                       # User interface components
+│   │   │   ├── control-panel.js         # Main control panel UI
+│   │   │   ├── modal-manager.js         # Modal dialogs & prompts
+│   │   │   ├── status-manager.js        # Status updates & feedback
+│   │   │   └── styles.js                # CSS injection & styling
+│   │   └── 📁 utils/                    # Utility functions
+│   │       ├── dom-utils.js             # DOM manipulation helpers
+│   │       ├── python-bridge.js         # Python callback interface
+│   │       └── template-builder.js      # Template generation logic
+│   └── 📁 models/                       # Data models & validation
+│       ├── __init__.py                  # Package initialization
+│       └── scraping_template.py         # Pydantic models for templates
+├── 📁 templates/                        # Generated JSON templates
+│   └── template.json                    # Example/current template
+├── 📁 output/                           # Scraped data files (JSON/CSV/Excel)
+│   ├── gibsondunn.com_*_*.json          # Sample output files
+│   └── ...                              # Additional scraped data
+├── 📁 examples/                         # Example scripts & demonstrations
+│   └── gibson_dunn_demo.py              # Gibson Dunn scraping demo
+├── 📁 tests/                            # Test suite
+│   ├── __init__.py                      # Package initialization
+│   ├── test_models.py                   # Template model tests
+│   └── test_scrapling_runner.py         # Scraping engine tests
+├── 📄 requirements.txt                  # Python dependencies
+├── 📄 CLAUDE.md                         # Claude Code guidance & project rules
+├── 📄 README.md                         # This file - project documentation
+├── 📄 quick_test.py                     # Quick testing script
+├── 📄 test_*.py                         # Additional test scripts
+└── 📁 venv/                             # Virtual environment (gitignored)
 ```
 
 ### Core Components
@@ -414,5 +458,5 @@ sudo playwright install-deps chromium
     {"label": "action_name", "selector": ".button", "action_type": "click"}
   ]
 }
-
 ```
+

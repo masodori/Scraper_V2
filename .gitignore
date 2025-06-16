@@ -94,6 +94,7 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
+test_fix*.py
 
 # Documentation Build
 docs/_build/
@@ -110,6 +111,7 @@ docs/_build/
 # Claude Code specific
 .claude/
 claude-*.json
+CLAUDE.md
 
 # Node.js (if any JS dependencies)
 node_modules/
@@ -138,3 +140,7 @@ template.json
 **/templates/*.json
 template.json
 templates/**/*.json
+# Examples
+*demo.py
+# VSCode Counter
+/.VSCodeCounter/

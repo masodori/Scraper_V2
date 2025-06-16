@@ -601,6 +601,14 @@
         },
         
         generateCSSSelector: function(element) {
+            // Check if this is a directory/listing context and use generalized smart generation
+            if (this.isDirectoryContext(element)) {
+                const smartSelector = this.generateSmartDirectorySelector(element);
+                if (smartSelector && this.validateSelector(smartSelector, element)) {
+                    return smartSelector;
+                }
+            }
+            
             // Try multiple strategies in order of preference
             const strategies = [
                 this.generateIdSelector,
@@ -622,7 +630,248 @@
             return this.generateEnhancedFallbackSelector(element);
         },
         
+        isDirectoryContext: function(element) {
+            // Check if we're in a directory/listing context by looking for repeating patterns
+            const url = window.location.href.toLowerCase();
+            const isDirectorySite = url.includes('people') || url.includes('team') || url.includes('staff') || 
+                                  url.includes('directory') || url.includes('members') || url.includes('professionals');
+            
+            if (!isDirectorySite) {
+                // Check if page has many similar elements (indicating a directory)
+                const similarElements = this.findSimilarElements(element);
+                return similarElements.length >= 3; // At least 3 similar elements suggests a directory
+            }
+            
+            return true;
+        },
+        
+        generateSmartDirectorySelector: function(element) {
+            const text = element.textContent?.trim() || '';
+            const tagName = element.tagName.toLowerCase();
+            
+            // For profile links (generic approach)
+            if (tagName === 'a' && element.href && this.isProfileLink(element.href)) {
+                return this.generateProfileLinkSelector(element);
+            }
+            
+            // For names (usually in strong tags or links)
+            if (this.isPersonName(element, text)) {
+                return this.generateNameSelector(element);
+            }
+            
+            // For emails
+            if (element.href && element.href.startsWith('mailto:')) {
+                return "a[href^='mailto:']";
+            }
+            
+            // For phone numbers
+            if (element.href && element.href.startsWith('tel:')) {
+                return "a[href^='tel:']";
+            }
+            
+            // For titles/positions (any text that looks like a job title)
+            if (this.isJobTitle(text)) {
+                return this.generateJobTitleSelector(element);
+            }
+            
+            return null;
+        },
+        
+        isProfileLink: function(href) {
+            // Generic patterns for profile links
+            const profilePatterns = ['/profile/', '/person/', '/member/', '/staff/', '/team/', '/bio/', '/lawyer/', '/attorney/'];
+            return profilePatterns.some(pattern => href.includes(pattern));
+        },
+        
+        generateProfileLinkSelector: function(element) {
+            const href = element.href;
+            // Extract the pattern from the URL
+            const profilePatterns = ['/profile/', '/person/', '/member/', '/staff/', '/team/', '/bio/', '/lawyer/', '/attorney/'];
+            const matchedPattern = profilePatterns.find(pattern => href.includes(pattern));
+            if (matchedPattern) {
+                return `a[href*='${matchedPattern}']`;
+            }
+            return "a[href]"; // Fallback to any link
+        },
+        
+        isPersonName: function(element, text) {
+            // Generic check for person names (proper case, reasonable length, not common words)
+            const hasProperCase = /^[A-Z][a-z]+ [A-Z]/.test(text);
+            const isReasonableLength = text.length > 5 && text.length < 60;
+            const notCommonWords = !this.isCommonDirectoryWord(text.toLowerCase());
+            
+            return hasProperCase && isReasonableLength && notCommonWords;
+        },
+        
+        generateNameSelector: function(element) {
+            const tagName = element.tagName.toLowerCase();
+            
+            // Check if element or its parent has meaningful CSS classes
+            const parent = element.closest('p, div, span');
+            if (parent && parent.className) {
+                const parentClasses = parent.className.toLowerCase();
+                if (parentClasses.includes('name')) {
+                    return tagName === 'strong' ? 'p.name strong, .name strong' : '.name';
+                }
+            }
+            
+            // Check if element itself has classes
+            if (element.className && element.className.toLowerCase().includes('name')) {
+                return `.${element.className.split(' ')[0]}`;
+            }
+            
+            // Profile link fallback
+            if (tagName === 'a' && element.href && this.isProfileLink(element.href)) {
+                return `a[href*='${this.getProfilePattern(element.href)}']`;
+            }
+            
+            // Generic fallbacks
+            if (tagName === 'strong') {
+                return "strong";
+            } else if (tagName === 'a') {
+                return "a";
+            } else {
+                return "*";
+            }
+        },
+        
+        getProfilePattern: function(href) {
+            const profilePatterns = ['/profile/', '/person/', '/member/', '/staff/', '/team/', '/bio/', '/lawyer/', '/attorney/'];
+            return profilePatterns.find(pattern => href.includes(pattern)) || '/lawyer/';
+        },
+        
+        isJobTitle: function(text) {
+            // Generic patterns for job titles
+            const titlePatterns = [
+                /\b(manager|director|president|vice|senior|junior|lead|head|chief|officer)\b/i,
+                /\b(consultant|specialist|analyst|coordinator|assistant|associate)\b/i,
+                /\b(founder|partner|counsel|attorney|advisor)\b/i
+            ];
+            return titlePatterns.some(pattern => pattern.test(text));
+        },
+        
+        generateJobTitleSelector: function(element) {
+            const tagName = element.tagName.toLowerCase();
+            
+            // Check if element or its parent has meaningful CSS classes
+            const parent = element.closest('p, div, span');
+            if (parent && parent.className) {
+                const parentClasses = parent.className.toLowerCase();
+                if (parentClasses.includes('title') || parentClasses.includes('position') || parentClasses.includes('role')) {
+                    return tagName === 'span' ? 'p.title span, .title span, .position span' : '.title, .position';
+                }
+            }
+            
+            // Check if element itself has classes
+            if (element.className) {
+                const elementClasses = element.className.toLowerCase();
+                if (elementClasses.includes('title') || elementClasses.includes('position') || elementClasses.includes('role')) {
+                    return `.${element.className.split(' ')[0]}`;
+                }
+            }
+            
+            // Generic fallback
+            return tagName === 'span' ? 'span' : '*';
+        },
+        
+        isCommonDirectoryWord: function(text) {
+            const commonWords = ['click', 'here', 'more', 'view', 'read', 'contact', 'email', 'phone', 'address', 'location'];
+            return commonWords.some(word => text.includes(word));
+        },
+        
+        findSimilarElements: function(element) {
+            // Find elements with similar structure/content patterns
+            const tagName = element.tagName.toLowerCase();
+            const className = element.className;
+            
+            let selector = tagName;
+            if (className && typeof className === 'string') {
+                const classes = className.trim().split(/\s+/).filter(cls => cls && !this.isGenericClass(cls));
+                if (classes.length > 0) {
+                    selector = `${tagName}.${classes[0]}`;
+                }
+            }
+            
+            try {
+                const similar = document.querySelectorAll(selector);
+                return Array.from(similar).filter(el => el !== element);
+            } catch (e) {
+                return [];
+            }
+        },
+        
+        generateSmartDirectoryXPath: function(element) {
+            const text = element.textContent?.trim() || '';
+            const tagName = element.tagName.toLowerCase();
+            
+            // For names - check for class-based selectors first
+            if (this.isPersonName(element, text)) {
+                const parent = element.closest('p, div, span');
+                if (parent && parent.className && parent.className.toLowerCase().includes('name')) {
+                    if (tagName === 'strong') {
+                        return 'xpath:.//p[contains(@class, "name")]//strong | .//*[contains(@class, "name")]//strong';
+                    }
+                }
+                // Fallback for names
+                if (tagName === 'strong') {
+                    return 'xpath:.//strong';
+                } else if (tagName === 'a') {
+                    return 'xpath:.//a';
+                }
+            }
+            
+            // For job titles - check for class-based selectors
+            if (this.isJobTitle(text)) {
+                const parent = element.closest('p, div, span');
+                if (parent && parent.className) {
+                    const parentClasses = parent.className.toLowerCase();
+                    if (parentClasses.includes('title') || parentClasses.includes('position')) {
+                        return 'xpath:.//p[contains(@class, "title")]//span | .//*[contains(@class, "title")]//span | .//*[contains(@class, "position")]//span';
+                    }
+                }
+                return 'xpath:.//span';
+            }
+            
+            // For emails - check for contact classes
+            if (element.href && element.href.startsWith('mailto:')) {
+                const parent = element.closest('p, div');
+                if (parent && parent.className && parent.className.toLowerCase().includes('contact')) {
+                    return "xpath:.//p[contains(@class, 'contact')]//a[starts-with(@href, 'mailto:')]";
+                }
+                return "xpath:.//a[starts-with(@href, 'mailto:')]";
+            }
+            
+            // For phone numbers - check for contact classes
+            if (element.href && element.href.startsWith('tel:')) {
+                const parent = element.closest('p, div');
+                if (parent && parent.className && parent.className.toLowerCase().includes('contact')) {
+                    return "xpath:.//p[contains(@class, 'contact')]//a[starts-with(@href, 'tel:')]";
+                }
+                return "xpath:.//a[starts-with(@href, 'tel:')]";
+            }
+            
+            // For profile links
+            if (tagName === 'a' && element.href && this.isProfileLink(element.href)) {
+                const profilePatterns = ['/profile/', '/person/', '/member/', '/staff/', '/team/', '/bio/', '/lawyer/', '/attorney/'];
+                const matchedPattern = profilePatterns.find(pattern => element.href.includes(pattern));
+                if (matchedPattern) {
+                    return `xpath:.//a[contains(@href, '${matchedPattern}')]`;
+                }
+                return 'xpath:.//a[@href]';
+            }
+            
+            return null;
+        },
+
         generateXPathSelector: function(element) {
+            // Check if this is a directory context and use smart XPath generation
+            if (this.isDirectoryContext(element)) {
+                const smartXPath = this.generateSmartDirectoryXPath(element);
+                if (smartXPath && this.validateXPathSelector(smartXPath.replace('xpath:', ''), element)) {
+                    return smartXPath;
+                }
+            }
+            
             // Generate XPath selector strategies
             const strategies = [
                 this.generateXPathById,

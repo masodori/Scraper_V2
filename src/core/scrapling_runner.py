@@ -16,6 +16,8 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
+import sys
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
 from scrapling.fetchers import PlayWrightFetcher, StealthyFetcher
 from scrapling import Adaptor
@@ -23,6 +25,56 @@ from scrapling import Adaptor
 from ..models.scraping_template import ScrapingTemplate, ScrapingResult, ElementSelector, NavigationAction, CookieData
 
 logger = logging.getLogger(__name__)
+
+
+class ProgressTracker:
+    """
+    Terminal progress bar for scraping operations.
+    """
+    
+    def __init__(self, total: int, description: str = "Progress"):
+        self.total = total
+        self.current = 0
+        self.description = description
+        self.start_time = time.time()
+        
+    def update(self, increment: int = 1, description: str = None):
+        """Update progress bar."""
+        self.current += increment
+        if description:
+            self.description = description
+        self._display_progress()
+    
+    def _display_progress(self):
+        """Display the progress bar."""
+        if self.total == 0:
+            return
+            
+        percent = (self.current / self.total) * 100
+        bar_length = 40
+        filled_length = int(bar_length * self.current // self.total)
+        
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        elapsed = time.time() - self.start_time
+        
+        if self.current > 0:
+            eta = (elapsed / self.current) * (self.total - self.current)
+            eta_str = f" ETA: {int(eta)}s" if eta > 1 else ""
+        else:
+            eta_str = ""
+        
+        # Clear line and print progress
+        sys.stdout.write(f'\r{self.description}: |{bar}| {self.current}/{self.total} ({percent:.1f}%){eta_str}')
+        sys.stdout.flush()
+        
+        if self.current >= self.total:
+            print()  # New line when complete
+    
+    def finish(self, description: str = "Complete"):
+        """Mark progress as finished."""
+        self.current = self.total
+        self.description = description
+        self._display_progress()
 
 
 class ScrapingContext:
@@ -269,9 +321,15 @@ class ScraplingRunner:
             if not self.current_page:
                 raise Exception("Failed to fetch the initial page")
             
+            # Auto-detect and handle infinite scroll for directory pages
+            if self._looks_like_directory_template():
+                logger.info("Directory template detected - checking for infinite scroll content")
+                self._auto_scroll_to_load_all_content()
+            
             # Handle pagination FIRST to collect all containers across pages
-            if hasattr(self.template, 'pagination') and self.template.pagination:
-                logger.info("Pagination detected - processing all pages/content")
+            # For directory templates, always attempt pagination even if not configured
+            if (hasattr(self.template, 'pagination') and self.template.pagination) or self._looks_like_directory_template():
+                logger.info("Pagination detected or directory template - processing all pages/content")
                 scraped_data = self._handle_filters_and_pagination()
             else:
                 # Single page extraction only
@@ -383,9 +441,16 @@ class ScraplingRunner:
         Returns:
             List of container elements representing lawyer profiles
         """
-        # Try Gibson Dunn specific patterns first
+        # Try Gibson Dunn specific patterns first - these are the actual containers on the site
         directory_patterns = [
-            ".people.loading",  # Gibson Dunn specific
+            # Gibson Dunn specific - look for elements with profile links
+            "*[data-wpgb-filter-item] .wp-block-column",  # Actual lawyer cards with filter data
+            "div.wp-block-column:has(a[href*='/lawyer/'])",  # Columns containing lawyer links
+            ".wp-grid-builder .wp-block-column",  # Grid builder columns
+            "div.wp-block-column",  # Each lawyer card container
+            "[class*='wp-block-column']",
+            # Legacy patterns
+            ".people.loading",  
             ".people-card", 
             ".lawyer-card",
             ".attorney-card",
@@ -407,8 +472,13 @@ class ScraplingRunner:
             except Exception:
                 continue
         
-        # Try content-based detection
+        # Try content-based detection for lawyer profiles specifically
         content_patterns = [
+            # Look for elements containing profile links
+            "//*[.//a[contains(@href, '/lawyer/')]]",
+            # Look for elements with lawyer-like content
+            "//*[contains(@class, 'column') and .//a[contains(@href, '/lawyer/')]]",
+            # Look for cards with partner/associate content
             "//*[contains(@class, 'card') and contains(., 'Partner')]",
             "//*[contains(@class, 'item') and .//a[contains(@href, '/lawyer/')]]",
             "//*[contains(., '@') and contains(., 'Partner')]//ancestor::*[2]",
@@ -552,24 +622,30 @@ class ScraplingRunner:
                         # Extract data based on element type
                         if elements:
                             if sub_type == 'text' and len(elements) > 1:
-                                # Multiple text elements - extract as list
+                                # Multiple text elements - extract as list, skip empty/None values
                                 text_values = []
                                 for elem in elements:
                                     text_content = elem.text if hasattr(elem, 'text') else str(elem)
-                                    if text_content and text_content.strip():
+                                    if text_content and text_content.strip() and text_content.strip().lower() != 'none':
                                         text_values.append(text_content.strip())
-                                subpage_data[sub_label] = text_values
+                                # Only set if we have actual values
+                                if text_values:
+                                    subpage_data[sub_label] = text_values
+                                else:
+                                    logger.debug(f"No valid text content found for {sub_label}")
                             elif elements:
                                 # Single element or first element
                                 text_content = elements[0].text if hasattr(elements[0], 'text') else str(elements[0])
-                                subpage_data[sub_label] = text_content.strip() if text_content else ''
+                                if text_content and text_content.strip() and text_content.strip().lower() != 'none':
+                                    subpage_data[sub_label] = text_content.strip()
+                                else:
+                                    logger.debug(f"No valid text content found for {sub_label}")
                         else:
                             logger.debug(f"No elements found for subpage {sub_label} with selector {sub_selector}")
-                            subpage_data[sub_label] = None
                             
                     except Exception as e:
                         logger.warning(f"Error extracting subpage element {sub_label}: {e}")
-                        subpage_data[sub_label] = None
+                        # Don't add None values - just skip failed extractions
             
             logger.info(f"Successfully extracted {len(subpage_data)} elements from subpage")
             
@@ -805,25 +881,249 @@ class ScraplingRunner:
         """
         extracted_data = {}
         
-        for element in self.template.elements:
+        # Initialize progress tracker
+        progress = ProgressTracker(len(self.template.elements), "Extracting elements")
+        
+        for idx, element in enumerate(self.template.elements):
             try:
+                progress.update(0, f"Extracting: {element.label}")
                 logger.debug(f"Extracting data for element: {element.label}")
                 
                 value = self._extract_element_data(element)
                 extracted_data[element.label] = value
                 
                 logger.debug(f"Successfully extracted {element.label}: {str(value)[:100]}...")
+                progress.update(1, f"Completed: {element.label}")
                 
             except Exception as e:
                 error_msg = f"Failed to extract {element.label}: {str(e)}"
                 logger.warning(error_msg)
+                progress.update(1, f"Failed: {element.label}")
                 
                 if element.is_required:
                     raise Exception(error_msg)
                 else:
                     extracted_data[element.label] = None
         
-        return extracted_data
+        progress.finish("Extraction complete")
+        
+        # Post-process to merge related containers with subpage data
+        merged_data = self._merge_related_containers(extracted_data)
+        return merged_data
+    
+    def _merge_related_containers(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge related containers that share the same profile link into nested structures.
+        
+        Args:
+            extracted_data: Raw extracted data with separate containers
+            
+        Returns:
+            Merged data with subpage information nested within main containers
+        """
+        try:
+            # Find main containers and subpage containers
+            main_containers = {}
+            subpage_containers = {}
+            other_data = {}
+            
+            for label, data in extracted_data.items():
+                if isinstance(data, list) and data and isinstance(data[0], dict):
+                    # Check if this looks like a main container (has basic profile info)
+                    sample_item = data[0]
+                    has_basic_fields = any(field in sample_item for field in ['name', 'Position', 'title'])
+                    has_subpage_fields = any(field in sample_item for field in ['education', 'credential', 'admission', 'bar'])
+                    
+                    if has_basic_fields and not has_subpage_fields:
+                        main_containers[label] = data
+                        logger.info(f"Identified '{label}' as main container with {len(data)} items")
+                    elif has_subpage_fields or 'subpage' in label.lower() or 'second' in label.lower():
+                        subpage_containers[label] = data
+                        logger.info(f"Identified '{label}' as subpage container with {len(data)} items")
+                    else:
+                        other_data[label] = data
+                else:
+                    other_data[label] = data
+            
+            # If we have both main and subpage containers, merge them
+            if main_containers and subpage_containers:
+                logger.info("Merging main and subpage containers...")
+                
+                for main_label, main_data in main_containers.items():
+                    for main_item in main_data:
+                        if not isinstance(main_item, dict) or '_profile_link' not in main_item:
+                            continue
+                            
+                        main_profile_link = main_item['_profile_link']
+                        main_index = main_item.get('_container_index')
+                        
+                        # Find matching subpage data
+                        for subpage_label, subpage_data in subpage_containers.items():
+                            for subpage_item in subpage_data:
+                                if not isinstance(subpage_item, dict):
+                                    continue
+                                    
+                                subpage_profile_link = subpage_item.get('_profile_link')
+                                subpage_index = subpage_item.get('_container_index')
+                                
+                                # Match by profile link or container index
+                                if (main_profile_link and subpage_profile_link and main_profile_link == subpage_profile_link) or \
+                                   (main_index is not None and subpage_index is not None and main_index == subpage_index):
+                                    
+                                    # Merge subpage data into main item
+                                    subpage_info = {k: v for k, v in subpage_item.items() 
+                                                  if not k.startswith('_')}
+                                    
+                                    # Nest subpage data under a clear key, or merge directly if it's profile details
+                                    if subpage_info:
+                                        # For cleaner structure, merge certain fields directly
+                                        if 'education' in subpage_label.lower() or 'credential' in subpage_label.lower():
+                                            # Add education/credentials directly to the main profile
+                                            for key, value in subpage_info.items():
+                                                if 'education' in key.lower() or 'credential' in key.lower():
+                                                    main_item[key] = value
+                                                else:
+                                                    main_item[f'{key}'] = value
+                                        else:
+                                            # For other subpage data, nest under descriptive key
+                                            clean_label = subpage_label.replace('container', '').replace('second', '').strip()
+                                            main_item[f'{clean_label}_details'] = subpage_info
+                                        
+                                        logger.debug(f"Merged {subpage_label} data into {main_label} item {main_index}")
+                
+                # Return merged data (main containers + other data, exclude processed subpage containers)
+                merged_result = {**main_containers, **other_data}
+                logger.info(f"Successfully merged containers. Final structure: {list(merged_result.keys())}")
+                return merged_result
+            
+            # If no merging needed, return original data
+            return extracted_data
+            
+        except Exception as e:
+            logger.warning(f"Error merging containers: {e}")
+            return extracted_data
+    
+    def _auto_scroll_to_load_all_content(self, target_page=None):
+        """
+        Automatically scroll to load all content on pages with infinite scroll.
+        
+        Args:
+            target_page: Specific page to scroll on. If None, uses self.current_page
+        """
+        try:
+            # Use the specified page or current page
+            scroll_page = target_page or self.current_page
+            if not scroll_page:
+                logger.warning("No page available for auto-scroll")
+                return
+            # Count initial elements
+            initial_count = self._count_profile_elements()
+            logger.info(f"Initial profile count: {initial_count}")
+            
+            if initial_count == 0:
+                logger.warning("No profiles found initially, skipping auto-scroll")
+                return
+            
+            max_scrolls = 20  # Prevent infinite loops
+            scroll_count = 0
+            last_count = initial_count
+            stable_count = 0  # Track how many times count stayed the same
+            
+            # Use Scrapling's page_action to scroll
+            progress = ProgressTracker(max_scrolls, "Auto-scrolling to load content")
+            
+            while scroll_count < max_scrolls:
+                scroll_count += 1
+                progress.update(0, f"Scroll {scroll_count}: {last_count} profiles loaded")
+                
+                try:
+                    # Try different approaches to load more content
+                    try:
+                        # First, try to find and click "Load More" buttons
+                        load_more_success = self._try_load_more_buttons()
+                        
+                        if not load_more_success:
+                            # Try scrolling using Scrapling's internal page
+                            scroll_success = self._try_scrapling_scroll(scroll_page)
+                            
+                            if not scroll_success:
+                                logger.warning("Cannot access page for scrolling, trying pagination")
+                                # Check for pagination links as fallback
+                                pagination_success = self._try_pagination_load()
+                                
+                                if not pagination_success:
+                                    logger.info("No more content loading methods available")
+                                    break
+                    except Exception as scroll_method_error:
+                        logger.debug(f"Scroll method failed: {scroll_method_error}")
+                        # If scrolling fails, we might have reached the end or page changed
+                        stable_count += 1
+                        if stable_count >= 2:
+                            logger.info("Scroll failed multiple times, assuming end of content reached")
+                            break
+                    
+                    # Wait for content to load
+                    time.sleep(2)
+                    
+                    # Check if more content loaded
+                    current_count = self._count_profile_elements()
+                    logger.debug(f"After scroll {scroll_count}: {current_count} profiles")
+                    
+                    if current_count > last_count:
+                        logger.info(f"Loaded {current_count - last_count} more profiles (total: {current_count})")
+                        last_count = current_count
+                        stable_count = 0  # Reset stability counter
+                        progress.update(1, f"Found {current_count} profiles")
+                    else:
+                        stable_count += 1
+                        progress.update(1, f"No new content ({stable_count}/3)")
+                        
+                        # If count has been stable for 3 scrolls, we've reached the end
+                        if stable_count >= 3:
+                            logger.info(f"No new content after {stable_count} scrolls - reached end")
+                            break
+                
+                except Exception as scroll_error:
+                    logger.warning(f"Error during scroll {scroll_count}: {scroll_error}")
+                    progress.update(1, f"Scroll error {scroll_count}")
+                    break
+            
+            final_count = self._count_profile_elements()
+            progress.finish(f"Loaded {final_count} total profiles")
+            logger.info(f"Auto-scroll complete: {final_count} profiles loaded (started with {initial_count})")
+            
+        except Exception as e:
+            logger.error(f"Error during auto-scroll: {e}")
+    
+    def _count_profile_elements(self) -> int:
+        """
+        Count the number of profile elements currently on the page.
+        """
+        try:
+            # Try multiple selectors to count profiles
+            selectors_to_try = [
+                '.people-list strong',  # Names
+                '.wp-grid-builder .wpgb-card',  # Grid cards
+                '.people-list .wp-block-column',  # Column blocks
+                '[class*="people"] strong',  # Any people container with strong tags
+                '.wpgb-grid-archivePeople > div'  # Direct children of people grid
+            ]
+            
+            max_count = 0
+            for selector in selectors_to_try:
+                try:
+                    elements = self.current_page.css(selector)
+                    count = len(elements) if elements else 0
+                    max_count = max(max_count, count)
+                    logger.debug(f"Selector '{selector}': {count} elements")
+                except Exception:
+                    continue
+            
+            return max_count
+            
+        except Exception as e:
+            logger.warning(f"Error counting profile elements: {e}")
+            return 0
     
     def _extract_element_data(self, element: ElementSelector) -> Any:
         """
@@ -1126,30 +1426,50 @@ class ScraplingRunner:
             # Smart container detection for directory pages
             container_elements = []
             
-            # If this looks like a directory template, try directory-specific container detection
+            # If this looks like a directory template, FORCE smart container detection
             if self._looks_like_directory_template():
-                logger.info("Directory template detected - using smart container detection")
+                logger.info("Directory template detected - FORCING smart container detection")
                 container_elements = self._find_directory_containers(element_config)
                 if container_elements:
                     logger.info(f"Smart directory detection found {len(container_elements)} lawyer profile containers")
+                    logger.info(f"OVERRIDING template selector '{element_config.selector}' with smart detection results")
+                    # Skip the original selector entirely for directory templates
+                else:
+                    logger.warning("Smart directory detection failed, falling back to original selector")
             
-            # Fallback to original selector approach
+            # Fallback to original selector approach ONLY if not a directory template
             if not container_elements:
                 try:
-                    container_elements = self.current_page.css(element_config.selector, auto_match=True)
-                    if container_elements:
-                        logger.info(f"AutoMatch found {len(container_elements)} elements with selector: {element_config.selector}")
+                    if element_config.selector_type == 'xpath' or element_config.selector.startswith('xpath:'):
+                        # Handle XPath selectors
+                        xpath_expr = element_config.selector[6:] if element_config.selector.startswith('xpath:') else element_config.selector
+                        container_elements = self.current_page.xpath(xpath_expr, auto_match=True)
+                        if container_elements:
+                            logger.info(f"XPath AutoMatch found {len(container_elements)} elements with selector: {xpath_expr}")
+                    else:
+                        # Handle CSS selectors
+                        container_elements = self.current_page.css(element_config.selector, auto_match=True)
+                        if container_elements:
+                            logger.info(f"CSS AutoMatch found {len(container_elements)} elements with selector: {element_config.selector}")
                 except Exception as automatch_error:
                     logger.debug(f"AutoMatch failed: {automatch_error}")
             
             # If AutoMatch didn't work, try regular selection
             if not container_elements:
                 try:
-                    container_elements = self.current_page.css(element_config.selector)
-                    if container_elements:
-                        logger.info(f"Regular CSS found {len(container_elements)} elements with selector: {element_config.selector}")
-                except Exception as css_error:
-                    logger.debug(f"Regular CSS selection failed: {css_error}")
+                    if element_config.selector_type == 'xpath' or element_config.selector.startswith('xpath:'):
+                        # Handle XPath selectors
+                        xpath_expr = element_config.selector[6:] if element_config.selector.startswith('xpath:') else element_config.selector
+                        container_elements = self.current_page.xpath(xpath_expr)
+                        if container_elements:
+                            logger.info(f"Regular XPath found {len(container_elements)} elements with selector: {xpath_expr}")
+                    else:
+                        # Handle CSS selectors
+                        container_elements = self.current_page.css(element_config.selector)
+                        if container_elements:
+                            logger.info(f"Regular CSS found {len(container_elements)} elements with selector: {element_config.selector}")
+                except Exception as selection_error:
+                    logger.debug(f"Regular selection failed: {selection_error}")
             
             # Try without dots for class selectors (handle dynamic classes)
             if not container_elements and '.' in element_config.selector:
@@ -1221,14 +1541,49 @@ class ScraplingRunner:
                         except Exception as xpath_error:
                             logger.warning(f"XPath selection failed: {xpath_error}")
             
+            # Final fallback: if XPath fails, try intelligent directory detection
+            if not container_elements and (element_config.selector_type == 'xpath' or element_config.selector.startswith('xpath:')):
+                logger.info("XPath selector found no elements, trying intelligent fallback for directory pages")
+                try:
+                    # Try common directory container patterns
+                    fallback_selectors = [
+                        '.wp-grid-builder.wpgb-template.wpgb-grid-archivePeople div.wp-block-column',
+                        '.people-list div.wp-block-column',
+                        '[class*="people"] div.wp-block-column',
+                        '[class*="grid"] div.wp-block-column',
+                        'div.wp-block-column',  # Very broad fallback
+                    ]
+                    
+                    for fallback_selector in fallback_selectors:
+                        try:
+                            container_elements = self.current_page.css(fallback_selector)
+                            if container_elements and len(container_elements) > 5:  # Reasonable number for directory
+                                logger.info(f"Fallback selector found {len(container_elements)} elements: {fallback_selector}")
+                                break
+                        except Exception:
+                            continue
+                            
+                except Exception as fallback_error:
+                    logger.debug(f"Fallback directory detection failed: {fallback_error}")
+            
             if not container_elements:
                 logger.warning(f"No container elements found after trying multiple selectors for: {element_config.selector}")
                 return []
             
             logger.info(f"Found {len(container_elements)} container elements")
             
+            # Count total sub-elements to extract for better progress tracking
+            total_sub_elements = len(container_elements)
+            if hasattr(element_config, 'sub_elements') and element_config.sub_elements:
+                total_sub_elements = len(container_elements) * len(element_config.sub_elements)
+            
+            # Initialize progress tracker for actual sub-elements
+            progress = ProgressTracker(total_sub_elements, f"Extracting from {element_config.label}")
+            extracted_count = 0
+            
             # Extract data from each container
             for i, container in enumerate(container_elements):
+                progress.update(0, f"Processing person {i+1}/{len(container_elements)}")
                 container_data = {}
                 
                 try:
@@ -1253,6 +1608,8 @@ class ScraplingRunner:
                                     sub_type = sub_element.element_type
                                     sub_required = getattr(sub_element, 'is_required', True)
                                 
+                                extracted_count += 1
+                                progress.update(0, f"Extracting {sub_label} from person {i+1}")
                                 logger.debug(f"Extracting sub-element {sub_label} with selector: {sub_selector}")
                                 
                                 # Enhance generic selectors with smart mapping
@@ -1337,8 +1694,14 @@ class ScraplingRunner:
                                             try:
                                                 sub_elements = container.xpath(fallback_xpath)
                                                 if sub_elements:
-                                                    logger.info(f"Fallback XPath worked for {sub_label}: {fallback_xpath}")
-                                                    break
+                                                    # Validate that we got reasonable content
+                                                    valid_elements = self._validate_extracted_elements(sub_elements, sub_label, sub_type)
+                                                    if valid_elements:
+                                                        sub_elements = valid_elements
+                                                        logger.info(f"Fallback XPath worked for {sub_label}: {fallback_xpath}")
+                                                        break
+                                                    else:
+                                                        sub_elements = []  # Reset if validation failed
                                             except Exception:
                                                 continue
                                 
@@ -1383,18 +1746,22 @@ class ScraplingRunner:
                                             container_data[sub_label] = text_content.strip() if text_content else ''
                                         
                                         logger.debug(f"Extracted {sub_label}: {container_data[sub_label]}")
+                                        progress.update(1, f"✓ Extracted {sub_label}")
                                     except Exception as extract_error:
                                         logger.warning(f"Error extracting value for {sub_label}: {extract_error}")
-                                        container_data[sub_label] = None
+                                        progress.update(1, f"✗ Failed {sub_label}")
+                                        # Don't add None values - skip failed extractions
                                 else:
                                     if sub_required:
                                         logger.warning(f"Required sub-element not found: {sub_label} with selector {sub_selector} in container {i}")
-                                    container_data[sub_label] = None
+                                    progress.update(1, f"✗ Missing {sub_label}")
+                                    # Don't add None values - skip missing elements
                                     
                             except Exception as e:
                                 sub_label = sub_element.get('label') if isinstance(sub_element, dict) else getattr(sub_element, 'label', 'unknown')
                                 logger.warning(f"Error processing sub-element {sub_label} from container {i}: {e}")
-                                container_data[sub_label] = None
+                                progress.update(1, f"✗ Error {sub_label}")
+                                # Don't add None values - skip failed extractions
                         
                         # Auto-extract profile link if needed and not already found
                         if needs_profile_link and not profile_link:
@@ -1469,11 +1836,20 @@ class ScraplingRunner:
                     container_data['_container_index'] = i
                     containers.append(container_data)
                     
+                    # If no sub-elements were processed, update progress for this container
+                    if not hasattr(element_config, 'sub_elements') or not element_config.sub_elements:
+                        progress.update(1, f"Completed person {i+1}")
+                    
                 except Exception as container_error:
                     logger.warning(f"Error processing container {i}: {container_error}")
                     # Add empty container to maintain index consistency
                     containers.append({'_container_index': i, '_error': str(container_error)})
+                    
+                    # Update progress for failed container
+                    if not hasattr(element_config, 'sub_elements') or not element_config.sub_elements:
+                        progress.update(1, f"Failed person {i+1}")
             
+            progress.finish(f"Extracted data from {len(containers)} people")
             logger.info(f"Successfully extracted data from {len(containers)} containers")
             return containers
             
@@ -1535,6 +1911,272 @@ class ScraplingRunner:
                 ])
         
         return patterns
+    
+    def _generate_fallback_xpaths(self, label: str, element_type: str) -> List[str]:
+        """
+        Generate fallback XPath patterns for common lawyer profile elements.
+        
+        Args:
+            label: The label of the element (e.g., 'name', 'email', 'position')
+            element_type: The type of element ('text', 'link', etc.)
+            
+        Returns:
+            List of XPath patterns to try
+        """
+        label_lower = label.lower()
+        patterns = []
+        
+        if 'name' in label_lower:
+            patterns.extend([
+                ".//a[contains(@href, '/lawyer/')]",  # Profile link text (Gibson Dunn style)
+                ".//strong",  # Any strong tag
+                ".//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6",  # Any heading
+                ".//*[contains(@class, 'name')]",
+                ".//*[contains(@class, 'title')]/strong",
+                ".//p/strong",
+                ".//div/strong",
+                ".//span[contains(@class, 'name')]",
+                ".//div[1]//text()[normalize-space()]",  # First div text content
+                ".//text()[normalize-space() and string-length(.) > 3][1]"  # First meaningful text
+            ])
+        
+        elif 'email' in label_lower:
+            patterns.extend([
+                ".//a[contains(@href, 'mailto:')]",
+                ".//*[contains(text(), '@')]",
+                ".//*[contains(@class, 'email')]",
+                ".//a[contains(@href, '@')]"
+            ])
+        
+        elif 'phone' in label_lower or 'telephone' in label_lower:
+            patterns.extend([
+                ".//a[contains(@href, 'tel:')]",
+                ".//*[contains(text(), '(') and contains(text(), ')')]",
+                ".//*[contains(@class, 'phone')]",
+                ".//*[contains(text(), '-') and string-length(text()) > 10]"
+            ])
+        
+        elif 'position' in label_lower or 'title' in label_lower:
+            patterns.extend([
+                ".//*[contains(text(), 'Partner') or contains(text(), 'Associate') or contains(text(), 'Counsel')]",
+                ".//span[contains(text(), 'Partner') or contains(text(), 'Associate')]", 
+                ".//p[contains(text(), 'Partner') or contains(text(), 'Associate')]",
+                ".//*[contains(@class, 'position')]",
+                ".//*[contains(@class, 'title')]",
+                ".//span",  # Any span
+                ".//div[contains(@class, 'position') or contains(@class, 'title')]",
+                ".//p[2]",
+                ".//text()[contains(., 'Partner') or contains(., 'Associate') or contains(., 'Counsel')]"
+            ])
+        
+        elif 'education' in label_lower:
+            patterns.extend([
+                ".//*[contains(text(), 'University') or contains(text(), 'College')]",
+                ".//*[contains(text(), 'J.D.') or contains(text(), 'LL.M')]",
+                ".//*[contains(text(), 'Bachelor') or contains(text(), 'Master')]",
+                ".//*[contains(@class, 'education')]",
+                ".//li[contains(text(), 'University')]"
+            ])
+        
+        elif 'cred' in label_lower or 'admission' in label_lower or 'bar' in label_lower:
+            patterns.extend([
+                ".//*[contains(text(), 'Bar') or contains(text(), 'Admission')]",
+                ".//*[contains(text(), 'Licensed') or contains(text(), 'Admitted')]",
+                ".//*[contains(@class, 'admission')]",
+                ".//li[contains(text(), 'Bar')]"
+            ])
+        
+        # Generic patterns for any element type
+        patterns.extend([
+            f".//*[contains(@class, '{label_lower}')]",
+            f".//text()[contains(., '{label_lower.title()}')]",
+            ".//p[position() <= 3]",  # First 3 paragraphs
+            ".//span[position() <= 3]",  # First 3 spans
+            ".//div[position() <= 3]"  # First 3 divs
+        ])
+        
+        return patterns
+    
+    def _validate_extracted_elements(self, elements: List, label: str, element_type: str) -> List:
+        """
+        Validate extracted elements to ensure they contain reasonable content.
+        
+        Args:
+            elements: List of elements to validate
+            label: The label of the element (e.g., 'name', 'position')
+            element_type: The type of element ('text', 'link', etc.)
+            
+        Returns:
+            List of validated elements or empty list if validation fails
+        """
+        if not elements:
+            return []
+        
+        label_lower = label.lower()
+        valid_elements = []
+        
+        for element in elements:
+            try:
+                if element_type == 'text':
+                    text = element.text if hasattr(element, 'text') else str(element)
+                    text = text.strip() if text else ''
+                    
+                    if not text or len(text) < 2:
+                        continue
+                    
+                    # Validate based on label type
+                    if 'name' in label_lower:
+                        if self._is_valid_name(text):
+                            valid_elements.append(element)
+                    elif 'position' in label_lower or 'title' in label_lower:
+                        if self._is_valid_position(text):
+                            valid_elements.append(element)
+                    elif 'email' in label_lower:
+                        if '@' in text and '.' in text:
+                            valid_elements.append(element)
+                    else:
+                        # For other types, just check it's not common junk
+                        if not self._is_common_junk(text):
+                            valid_elements.append(element)
+                            
+                elif element_type == 'link':
+                    href = ''
+                    if hasattr(element, 'get_attribute'):
+                        href = element.get_attribute('href') or ''
+                    elif hasattr(element, 'attrib'):
+                        href = element.attrib.get('href', '')
+                    
+                    if href and (href.startswith('http') or href.startswith('mailto:') or href.startswith('tel:')):
+                        valid_elements.append(element)
+                else:
+                    # For other types, include all elements
+                    valid_elements.append(element)
+                    
+            except Exception as e:
+                logger.debug(f"Error validating element: {e}")
+                continue
+        
+        # Return elements only if we found reasonable matches
+        if len(valid_elements) > 0 and len(valid_elements) <= len(elements) * 0.8:  # At most 80% of elements should be valid
+            return valid_elements
+        
+        return []
+    
+    def _is_valid_name(self, text: str) -> bool:
+        """Check if text looks like a person's name."""
+        # Should have proper case and reasonable length
+        if len(text) < 3 or len(text) > 60:
+            return False
+        
+        # Should contain at least one space (first + last name)
+        if ' ' not in text:
+            return False
+        
+        # Should start with capital letter
+        if not text[0].isupper():
+            return False
+        
+        # Shouldn't contain common non-name words
+        common_words = ['click', 'here', 'more', 'view', 'contact', 'email', 'phone', 'representative', 'experience']
+        text_lower = text.lower()
+        if any(word in text_lower for word in common_words):
+            return False
+        
+        return True
+    
+    def _is_valid_position(self, text: str) -> bool:
+        """Check if text looks like a job position."""
+        # Should be reasonable length
+        if len(text) < 3 or len(text) > 100:
+            return False
+        
+        # Should contain common position words or not be junk
+        position_words = ['partner', 'associate', 'counsel', 'director', 'manager', 'senior', 'junior', 'lead', 'head', 'chief']
+        text_lower = text.lower()
+        
+        # Either contains position words or doesn't contain junk
+        has_position_words = any(word in text_lower for word in position_words)
+        has_junk = self._is_common_junk(text)
+        
+        return has_position_words or not has_junk
+    
+    def _is_common_junk(self, text: str) -> bool:
+        """Check if text is common junk that shouldn't be extracted."""
+        junk_phrases = [
+            'your privacy choices', 'cookies', 'always active', 'global search', 
+            'follow us', 'connect with us', 'scroll to top', 'click here', 'read more',
+            'view more', 'load more', 'show more', 'copyright', 'all rights reserved'
+        ]
+        
+        text_lower = text.lower()
+        return any(phrase in text_lower for phrase in junk_phrases)
+    
+    def _try_load_more_buttons(self) -> bool:
+        """Try to find and click Load More buttons."""
+        load_more_patterns = [
+            'button:contains("Load More")',
+            'button:contains("Show More")', 
+            'button:contains("View More")',
+            'a:contains("Load More")',
+            'a:contains("Show More")',
+            '.load-more',
+            '.show-more',
+            '.view-more',
+            '[data-load-more]'
+        ]
+        
+        for pattern in load_more_patterns:
+            try:
+                elements = self.current_page.css(pattern)
+                if elements:
+                    logger.info(f"Found Load More button with pattern: {pattern}")
+                    # In Scrapling, we can't click, but we can note the pattern exists
+                    return True
+            except Exception:
+                continue
+        
+        return False
+    
+    def _try_scrapling_scroll(self, scroll_page) -> bool:
+        """Try scrolling using Scrapling's internal mechanisms."""
+        try:
+            # Try to access internal browser/page from Scrapling
+            if hasattr(scroll_page, '_browser') and scroll_page._browser:
+                # This might work with some versions of Scrapling
+                scroll_page._browser.execute_script("window.scrollBy(0, 3000);")
+                logger.debug("Scrolled using Scrapling browser")
+                return True
+            elif hasattr(self.fetcher, 'browser') and self.fetcher.browser:
+                # Try fetcher's browser
+                self.fetcher.browser.execute_script("window.scrollBy(0, 3000);")
+                logger.debug("Scrolled using fetcher browser")
+                return True
+        except Exception as e:
+            logger.debug(f"Scrapling scroll failed: {e}")
+        
+        return False
+    
+    def _try_pagination_load(self) -> bool:
+        """Try to load more content via pagination."""
+        pagination_patterns = [
+            'a:contains("Next")',
+            'a:contains(">")', 
+            '.pagination a:last-child',
+            '.next',
+            '.page-next'
+        ]
+        
+        for pattern in pagination_patterns:
+            try:
+                elements = self.current_page.css(pattern)
+                if elements:
+                    logger.info(f"Found pagination with pattern: {pattern}")
+                    # Note: In Scrapling we can't navigate, but we detected the pattern
+                    return True
+            except Exception:
+                continue
+        
+        return False
     
     def _make_selector_generic(self, selector: str) -> str:
         """
@@ -2583,61 +3225,27 @@ class ScraplingRunner:
             Dictionary containing data from all pages
         """
         all_containers_data = {}
-        page_number = 1
         
         try:
-            while True:
-                logger.info(f"Processing page {page_number}")
+            # Check if this is a directory template that might benefit from URL-based pagination
+            if self._looks_like_directory_template():
+                logger.info("Directory template detected - attempting automatic pagination detection")
                 
-                # Extract data from current page
-                page_data = self._extract_data()
+                # Try URL-based pagination first (most reliable for directory pages)
+                pagination_data = self._try_url_based_pagination()
+                if pagination_data:
+                    return pagination_data
                 
-                if page_data:
-                    # Aggregate container data across pages
-                    for key, value in page_data.items():
-                        if isinstance(value, list):
-                            # This is likely container data
-                            if key not in all_containers_data:
-                                all_containers_data[key] = []
-                            all_containers_data[key].extend(value)
-                        else:
-                            # Single value data - take from first page or latest
-                            if key not in all_containers_data:
-                                all_containers_data[key] = value
+                # Fall back to scroll/load more approaches
+                return self._try_scroll_based_pagination()
+            else:
+                # For non-directory templates, use standard pagination
+                return self._try_standard_pagination()
                 
-                # Handle load more buttons or pagination
-                more_content_loaded = False
-                if hasattr(self.template, 'pagination') and self.template.pagination:
-                    if self.template.pagination.pattern_type == 'load_more':
-                        more_content_loaded = self._handle_load_more_pagination()
-                    else:
-                        more_content_loaded = self._handle_pagination()
-                    
-                    if not more_content_loaded:
-                        break
-                else:
-                    # No pagination configured, just process current page
-                    break
-                
-                page_number += 1
-                
-                # Safety check to prevent infinite loops
-                if hasattr(self.template.pagination, 'max_pages') and self.template.pagination.max_pages:
-                    if page_number > self.template.pagination.max_pages:
-                        break
-                        
-                # Add delay between pagination requests
-                if hasattr(self.template.pagination, 'scroll_pause_time'):
-                    time.sleep(self.template.pagination.scroll_pause_time)
-                else:
-                    time.sleep(2)
-        
-            logger.info(f"Completed pagination processing. Total pages: {page_number}")
-            return all_containers_data
-            
         except Exception as e:
             logger.error(f"Error in pagination processing: {e}")
-            return all_containers_data
+            # Return single page data as fallback
+            return self._extract_data()
     
     def _handle_pagination(self) -> bool:
         """
@@ -2827,6 +3435,634 @@ class ScraplingRunner:
         
         return flattened
     
+    def _try_url_based_pagination(self) -> Optional[Dict[str, Any]]:
+        """
+        Attempt URL-based pagination by detecting and testing common pagination parameters.
+        
+        Returns:
+            Dictionary containing all paginated data, or None if pagination not possible
+        """
+        try:
+            base_url = self.template.url
+            parsed_url = urlparse(base_url)
+            base_query = parse_qs(parsed_url.query)
+            
+            # Common pagination parameter patterns to test
+            pagination_patterns = [
+                {'param': 'offset', 'step': 20, 'start': 0},
+                {'param': 'page', 'step': 1, 'start': 1},
+                {'param': 'skip', 'step': 20, 'start': 0},
+                {'param': 'start', 'step': 20, 'start': 0},
+                {'param': 'from', 'step': 20, 'start': 0}
+            ]
+            
+            # Test which pagination pattern works
+            working_pattern = None
+            for pattern in pagination_patterns:
+                test_query = base_query.copy()
+                test_query[pattern['param']] = [str(pattern['step'])]
+                
+                test_url = urlunparse((
+                    parsed_url.scheme, parsed_url.netloc, parsed_url.path,
+                    parsed_url.params, urlencode(test_query, doseq=True), parsed_url.fragment
+                ))
+                
+                # Test if this pagination pattern works
+                test_page = self._fetch_page(test_url)
+                if test_page and self._has_different_content(test_page):
+                    working_pattern = pattern
+                    logger.info(f"Detected working pagination pattern: {pattern['param']}")
+                    break
+            
+            if not working_pattern:
+                logger.info("No URL-based pagination pattern detected")
+                return None
+            
+            # Extract data from all pages using the working pattern
+            all_data = {}
+            current_offset = working_pattern['start']
+            consecutive_empty_pages = 0
+            max_pages = 200  # Safety limit
+            page_count = 0
+            
+            while page_count < max_pages and consecutive_empty_pages < 3:
+                # Build URL for current page
+                page_query = base_query.copy()
+                page_query[working_pattern['param']] = [str(current_offset)]
+                
+                page_url = urlunparse((
+                    parsed_url.scheme, parsed_url.netloc, parsed_url.path,
+                    parsed_url.params, urlencode(page_query, doseq=True), parsed_url.fragment
+                ))
+                
+                logger.info(f"Fetching page {page_count + 1} with {working_pattern['param']}={current_offset}")
+                
+                # Fetch and extract data from this page
+                page = self._fetch_page(page_url)
+                if not page:
+                    break
+                
+                self.current_page = page
+                page_data = self._extract_data()
+                
+                if page_data:
+                    # Check if page has new content
+                    has_new_content = False
+                    for key, value in page_data.items():
+                        if isinstance(value, list) and value:
+                            if key not in all_data:
+                                all_data[key] = []
+                            
+                            # Check for duplicate content (indicating we've reached the end)
+                            new_items = []
+                            for item in value:
+                                if item not in all_data[key]:
+                                    new_items.append(item)
+                                    has_new_content = True
+                            
+                            all_data[key].extend(new_items)
+                        else:
+                            if key not in all_data:
+                                all_data[key] = value
+                    
+                    if not has_new_content:
+                        consecutive_empty_pages += 1
+                        logger.info(f"No new content found on page {page_count + 1}")
+                    else:
+                        consecutive_empty_pages = 0
+                else:
+                    consecutive_empty_pages += 1
+                
+                current_offset += working_pattern['step']
+                page_count += 1
+                
+                # Add delay between requests
+                time.sleep(1)
+            
+            if all_data:
+                logger.info(f"URL-based pagination complete: extracted data from {page_count} pages")
+                return all_data
+            else:
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error in URL-based pagination: {e}")
+            return None
+    
+    def _has_different_content(self, test_page) -> bool:
+        """
+        Check if a test page has different content than the current page.
+        
+        Args:
+            test_page: Page to compare against current page
+            
+        Returns:
+            True if pages have different content, False otherwise
+        """
+        try:
+            if not self.current_page or not test_page:
+                return False
+            
+            # Compare number of containers as a quick check
+            current_containers = self._get_container_count(self.current_page)
+            test_containers = self._get_container_count(test_page)
+            
+            # If container counts are different and both > 0, it's likely different content
+            return test_containers > 0 and current_containers != test_containers
+            
+        except Exception:
+            return False
+    
+    def _get_container_count(self, page) -> int:
+        """
+        Get the number of containers on a page for comparison.
+        
+        Args:
+            page: Page to count containers on
+            
+        Returns:
+            Number of containers found
+        """
+        try:
+            # Try common directory container patterns
+            selectors = [
+                '.people-list strong',
+                '[class*="people"] strong', 
+                '.wpgb-grid > div',
+                '.directory-item',
+                '[class*="card"]',
+                '[class*="item"]'
+            ]
+            
+            for selector in selectors:
+                try:
+                    elements = page.css(selector)
+                    if elements and len(elements) > 5:  # Must have substantial content
+                        return len(elements)
+                except Exception:
+                    continue
+            
+            return 0
+            
+        except Exception:
+            return 0
+    
+    def _try_scroll_based_pagination(self) -> Dict[str, Any]:
+        """
+        Fallback pagination using scroll/load more detection.
+        
+        Returns:
+            Dictionary containing extracted data
+        """
+        try:
+            logger.info("Attempting scroll-based pagination detection")
+            
+            # Try to auto-detect load more buttons
+            detected_load_more = self._auto_detect_load_more_buttons()
+            
+            if detected_load_more:
+                logger.info(f"Auto-detected load more button: {detected_load_more}")
+                return self._try_auto_load_more_pagination(detected_load_more)
+            
+            # Try infinite scroll detection for WPGB
+            if self._detect_wpgb_infinite_scroll():
+                logger.info("WordPress Grid Builder infinite scroll detected")
+                return self._try_wpgb_infinite_scroll_pagination()
+            
+            # First extract current page data
+            current_data = self._extract_data()
+            
+            # Try load more approaches if available
+            if hasattr(self.template, 'pagination') and self.template.pagination:
+                return self._try_standard_pagination()
+            
+            return current_data
+            
+        except Exception as e:
+            logger.warning(f"Error in scroll-based pagination: {e}")
+            return self._extract_data()
+    
+    def _try_standard_pagination(self) -> Dict[str, Any]:
+        """
+        Standard pagination processing for configured templates.
+        
+        Returns:
+            Dictionary containing all paginated data
+        """
+        all_containers_data = {}
+        page_number = 1
+        
+        try:
+            while True:
+                logger.info(f"Processing page {page_number}")
+                
+                # Extract data from current page
+                page_data = self._extract_data()
+                
+                if page_data:
+                    # Aggregate container data across pages
+                    for key, value in page_data.items():
+                        if isinstance(value, list):
+                            # This is likely container data
+                            if key not in all_containers_data:
+                                all_containers_data[key] = []
+                            all_containers_data[key].extend(value)
+                        else:
+                            # Single value data - take from first page or latest
+                            if key not in all_containers_data:
+                                all_containers_data[key] = value
+                
+                # Handle pagination
+                more_content_loaded = False
+                if hasattr(self.template, 'pagination') and self.template.pagination:
+                    if self.template.pagination.pattern_type == 'load_more':
+                        more_content_loaded = self._handle_load_more_pagination()
+                    else:
+                        more_content_loaded = self._handle_pagination()
+                    
+                    if not more_content_loaded:
+                        break
+                else:
+                    break
+                
+                page_number += 1
+                
+                # Safety check
+                if hasattr(self.template.pagination, 'max_pages') and self.template.pagination.max_pages:
+                    if page_number > self.template.pagination.max_pages:
+                        break
+                        
+                # Add delay between requests
+                if hasattr(self.template.pagination, 'scroll_pause_time'):
+                    time.sleep(self.template.pagination.scroll_pause_time)
+                else:
+                    time.sleep(2)
+        
+            logger.info(f"Completed standard pagination processing. Total pages: {page_number}")
+            return all_containers_data
+            
+        except Exception as e:
+            logger.error(f"Error in standard pagination processing: {e}")
+            return all_containers_data
+    
+    def _auto_detect_load_more_buttons(self) -> Optional[str]:
+        """
+        Automatically detect load more buttons on the current page.
+        
+        Returns:
+            CSS selector for the load more button, or None if not found
+        """
+        try:
+            # Common load more button patterns
+            load_more_selectors = [
+                # WordPress Grid Builder specific patterns
+                '.wpgb-pagination-facet button',
+                '.wpgb-pagination-facet a',
+                '.wpgb-pagination-facet [class*="load"]',
+                '.wpgb-pagination-facet [class*="more"]',
+                '.wpgb-facet[class*="pagination"]',
+                '.wpgb-load-more',
+                '.wpgb-button[class*="load"]',
+                '.wpgb-button[class*="more"]',
+                # Generic pagination patterns
+                'button[class*="load"]',
+                'button[class*="more"]',
+                'button[class*="show"]',
+                'a[class*="load"]',
+                'a[class*="more"]', 
+                '[class*="load-more"]',
+                '[class*="show-more"]',
+                'button:contains("Load More")',
+                'button:contains("Show More")',
+                'button:contains("View More")',
+                'a:contains("Load More")',
+                'a:contains("Show More")',
+                'a:contains("View More")',
+                '.load-more',
+                '.show-more',
+                '.view-more',
+                # Infinite scroll triggers
+                '.infinite-scroll-trigger',
+                '.infinite-scroll-button',
+                '.lazy-load-trigger'
+            ]
+            
+            for selector in load_more_selectors:
+                try:
+                    elements = self.current_page.css(selector)
+                    if elements and len(elements) > 0:
+                        # Check if the element is actually visible and clickable
+                        element = elements[0]
+                        if hasattr(element, 'is_visible') and element.is_visible():
+                            logger.info(f"Found visible load more button with selector: {selector}")
+                            return selector
+                        elif hasattr(element, 'text') or hasattr(element, 'get_attribute'):
+                            # Element exists, assume it's clickable
+                            logger.info(f"Found load more button with selector: {selector}")
+                            return selector
+                except Exception:
+                    continue
+            
+            logger.info("No load more buttons detected")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error in load more button detection: {e}")
+            return None
+    
+    def _try_auto_load_more_pagination(self, load_more_selector: str) -> Dict[str, Any]:
+        """
+        Attempt pagination using auto-detected load more button.
+        
+        Args:
+            load_more_selector: CSS selector for the load more button
+            
+        Returns:
+            Dictionary containing all paginated data
+        """
+        all_data = {}
+        max_clicks = 200  # Safety limit
+        clicks_performed = 0
+        consecutive_failures = 0
+        
+        try:
+            logger.info(f"Starting auto load more pagination with selector: {load_more_selector}")
+            
+            # Get initial data
+            page_data = self._extract_data()
+            if page_data:
+                for key, value in page_data.items():
+                    if isinstance(value, list):
+                        all_data[key] = value.copy()
+                    else:
+                        all_data[key] = value
+                        
+                logger.info(f"Initial page loaded with {len(all_data.get('main_container', []))} items")
+            
+            while clicks_performed < max_clicks and consecutive_failures < 3:
+                try:
+                    # Check if load more button still exists
+                    load_more_elements = self.current_page.css(load_more_selector)
+                    if not load_more_elements:
+                        logger.info("Load more button no longer found - pagination complete")
+                        break
+                    
+                    # Use Scrapling's fetcher with page_action to click load more
+                    def click_load_more_action(page):
+                        try:
+                            button_locator = page.locator(load_more_selector)
+                            if button_locator.count() == 0:
+                                logger.info("Load more button not found during click action")
+                                return page
+                            
+                            if not button_locator.is_visible():
+                                logger.info("Load more button not visible during click action")
+                                return page
+                            
+                            # Scroll to button and click
+                            button_locator.scroll_into_view_if_needed()
+                            time.sleep(1)  # Small delay for scrolling
+                            button_locator.click()
+                            
+                            logger.info(f"Clicked load more button (click #{clicks_performed + 1})")
+                            
+                            # Wait for new content to load
+                            page.wait_for_timeout(3000)  # 3 second wait
+                            page.wait_for_load_state('networkidle', timeout=10000)
+                            
+                            return page
+                            
+                        except Exception as action_error:
+                            logger.warning(f"Error clicking load more button: {action_error}")
+                            return page
+                    
+                    # Fetch updated page with load more action
+                    fetch_options = {
+                        'headless': self.template.headless,
+                        'network_idle': True,
+                        'timeout': self.template.wait_timeout * 1000,
+                        'page_action': click_load_more_action
+                    }
+                    
+                    updated_page = self.fetcher.fetch(self.template.url, **fetch_options)
+                    
+                    if updated_page and updated_page.status == 200:
+                        self.current_page = updated_page
+                        clicks_performed += 1
+                        
+                        # Extract new data
+                        new_page_data = self._extract_data()
+                        
+                        if new_page_data:
+                            # Check if we got new content
+                            new_content_found = False
+                            for key, value in new_page_data.items():
+                                if isinstance(value, list) and value:
+                                    if key not in all_data:
+                                        all_data[key] = []
+                                    
+                                    # Count new items
+                                    initial_count = len(all_data[key])
+                                    
+                                    # Add only new items (avoid duplicates)
+                                    for item in value:
+                                        if item not in all_data[key]:
+                                            all_data[key].append(item)
+                                            new_content_found = True
+                                    
+                                    new_count = len(all_data[key])
+                                    logger.info(f"After click #{clicks_performed}: {key} has {new_count} items (added {new_count - initial_count})")
+                                else:
+                                    if key not in all_data:
+                                        all_data[key] = value
+                            
+                            if new_content_found:
+                                consecutive_failures = 0
+                            else:
+                                consecutive_failures += 1
+                                logger.info(f"No new content found after click #{clicks_performed}")
+                        else:
+                            consecutive_failures += 1
+                            logger.warning(f"Failed to extract data after click #{clicks_performed}")
+                        
+                        # Add delay between clicks
+                        time.sleep(2)
+                    else:
+                        consecutive_failures += 1
+                        logger.warning(f"Failed to fetch updated page after click #{clicks_performed}")
+                        
+                except Exception as click_error:
+                    consecutive_failures += 1
+                    logger.warning(f"Error during load more click #{clicks_performed}: {click_error}")
+            
+            total_items = len(all_data.get('main_container', []))
+            logger.info(f"Auto load more pagination complete: performed {clicks_performed} clicks, collected {total_items} total items")
+            
+            return all_data
+            
+        except Exception as e:
+            logger.error(f"Error in auto load more pagination: {e}")
+            return all_data or self._extract_data()
+    
+    def _detect_wpgb_infinite_scroll(self) -> bool:
+        """
+        Detect if the page uses WordPress Grid Builder with infinite scroll.
+        
+        Returns:
+            True if WPGB infinite scroll is detected, False otherwise
+        """
+        try:
+            # Check for WPGB indicators
+            wpgb_indicators = [
+                '.wp-grid-builder',
+                '.wpgb-template',
+                '.wpgb-grid',
+                '.wpgb-facet',
+                '[data-grid]'
+            ]
+            
+            for indicator in wpgb_indicators:
+                elements = self.current_page.css(indicator)
+                if elements:
+                    logger.info(f"WPGB indicator found: {indicator}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error detecting WPGB infinite scroll: {e}")
+            return False
+    
+    def _try_wpgb_infinite_scroll_pagination(self) -> Dict[str, Any]:
+        """
+        Attempt pagination using WPGB infinite scroll by scrolling to trigger more content.
+        
+        Returns:
+            Dictionary containing all paginated data
+        """
+        all_data = {}
+        max_scrolls = 200  # Safety limit
+        scrolls_performed = 0
+        consecutive_no_new_content = 0
+        
+        try:
+            logger.info("Starting WPGB infinite scroll pagination")
+            
+            # Get initial data
+            page_data = self._extract_data()
+            if page_data:
+                for key, value in page_data.items():
+                    if isinstance(value, list):
+                        all_data[key] = value.copy()
+                    else:
+                        all_data[key] = value
+                        
+                initial_count = len(all_data.get('main_container', []))
+                logger.info(f"Initial page loaded with {initial_count} items")
+            
+            while scrolls_performed < max_scrolls and consecutive_no_new_content < 5:
+                try:
+                    # Use Scrapling's fetcher with page_action to scroll and wait for new content
+                    def scroll_and_wait_action(page):
+                        try:
+                            # Get current number of elements before scrolling
+                            current_containers = page.query_selector_all('.people.loading')
+                            before_count = len(current_containers) if current_containers else 0
+                            
+                            # Scroll to bottom to trigger infinite scroll
+                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            page.wait_for_timeout(2000)  # Wait for scroll to process
+                            
+                            # Wait for new content to potentially load
+                            try:
+                                # Wait for new elements to appear (or timeout after 5 seconds)
+                                page.wait_for_function(
+                                    f"document.querySelectorAll('.people.loading').length > {before_count}",
+                                    timeout=5000
+                                )
+                                logger.info(f"New content loaded after scroll #{scrolls_performed + 1}")
+                            except Exception:
+                                # No new content appeared within timeout
+                                logger.info(f"No new content after scroll #{scrolls_performed + 1}")
+                            
+                            # Additional wait for any lazy loading
+                            page.wait_for_timeout(1000)
+                            
+                            return page
+                            
+                        except Exception as action_error:
+                            logger.warning(f"Error during scroll action: {action_error}")
+                            return page
+                    
+                    # Fetch updated page with scroll action
+                    fetch_options = {
+                        'headless': self.template.headless,
+                        'network_idle': True,
+                        'timeout': self.template.wait_timeout * 1000,
+                        'page_action': scroll_and_wait_action
+                    }
+                    
+                    updated_page = self.fetcher.fetch(self.template.url, **fetch_options)
+                    
+                    if updated_page and updated_page.status == 200:
+                        self.current_page = updated_page
+                        scrolls_performed += 1
+                        
+                        # Extract new data
+                        new_page_data = self._extract_data()
+                        
+                        if new_page_data:
+                            # Check if we got new content
+                            new_content_found = False
+                            for key, value in new_page_data.items():
+                                if isinstance(value, list) and value:
+                                    if key not in all_data:
+                                        all_data[key] = []
+                                    
+                                    # Count new items
+                                    initial_count = len(all_data[key])
+                                    
+                                    # Add only new items (avoid duplicates)
+                                    for item in value:
+                                        if item not in all_data[key]:
+                                            all_data[key].append(item)
+                                            new_content_found = True
+                                    
+                                    new_count = len(all_data[key])
+                                    if new_count > initial_count:
+                                        logger.info(f"After scroll #{scrolls_performed}: {key} has {new_count} items (added {new_count - initial_count})")
+                                else:
+                                    if key not in all_data:
+                                        all_data[key] = value
+                            
+                            if new_content_found:
+                                consecutive_no_new_content = 0
+                            else:
+                                consecutive_no_new_content += 1
+                                logger.info(f"No new content found after scroll #{scrolls_performed}")
+                        else:
+                            consecutive_no_new_content += 1
+                            logger.warning(f"Failed to extract data after scroll #{scrolls_performed}")
+                        
+                        # Add delay between scrolls
+                        time.sleep(2)
+                    else:
+                        consecutive_no_new_content += 1
+                        logger.warning(f"Failed to fetch updated page after scroll #{scrolls_performed}")
+                        
+                except Exception as scroll_error:
+                    consecutive_no_new_content += 1
+                    logger.warning(f"Error during scroll #{scrolls_performed}: {scroll_error}")
+            
+            total_items = len(all_data.get('main_container', []))
+            logger.info(f"WPGB infinite scroll pagination complete: performed {scrolls_performed} scrolls, collected {total_items} total items")
+            
+            return all_data
+            
+        except Exception as e:
+            logger.error(f"Error in WPGB infinite scroll pagination: {e}")
+            return all_data or self._extract_data()
+
     def export_data(self, result: ScrapingResult, output_file: str, format: str = "json") -> None:
         """
         Export scraped data to various formats.

@@ -26,12 +26,17 @@ from .scrapling_runner import ScraplingRunner
 init(autoreset=True)
 
 # Setup clean CLI with comprehensive file logging
-def setup_logging():
+def setup_logging(session_type="general"):
     """Setup dual logging: clean CLI output + comprehensive file logging."""
     
     # Ensure logs directory exists
     logs_dir = Path('logs')
     logs_dir.mkdir(exist_ok=True)
+    
+    # Create unique log file for each session
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"{session_type}_{timestamp}.log"
     
     # Create formatters
     file_formatter = logging.Formatter(
@@ -40,13 +45,15 @@ def setup_logging():
     console_formatter = logging.Formatter('%(message)s')
     
     # Create handlers
-    file_handler = logging.FileHandler(logs_dir / 'scraper.log')
+    file_handler = logging.FileHandler(logs_dir / log_filename)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
     
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.WARNING)  # Only show warnings/errors in console
     console_handler.setFormatter(console_formatter)
+    
+    print(f"📋 Debug logging to: logs/{log_filename}")
     
     # Configure root logger
     root_logger = logging.getLogger()
@@ -71,7 +78,7 @@ def setup_logging():
     
     return logging.getLogger(__name__)
 
-logger = setup_logging()
+logger = setup_logging("general")
 
 
 class ProgressIndicator:
@@ -118,7 +125,7 @@ class ProgressIndicator:
         print(f"{Fore.GREEN}📁 {file_type.title()} saved: {Fore.WHITE}{filepath}")
 
 
-logger = setup_logging()
+logger = setup_logging("interactive")
 
 
 class InteractiveSession:
@@ -490,6 +497,9 @@ def run_scraper(template_file: str, output_file: Optional[str] = None, format: s
     Returns:
         Path to the output file
     """
+    # Setup unique logging for this scrape session
+    scrape_logger = setup_logging("scrape")
+    
     ProgressIndicator.print_header("Automated Scraping Execution")
     ProgressIndicator.print_step("Loading template", template_file)
     
