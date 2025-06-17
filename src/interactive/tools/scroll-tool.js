@@ -2,12 +2,10 @@
  * Scroll/Pagination Tool
  */
 
-import { BaseTool } from './base-tool.js';
-import { ModalManager } from '../ui/modal-manager.js';
-import { generateOptimalSelector } from '../selectors/selector-generator.js';
-import { isControlPanelElement } from '../utils/dom-utils.js';
+// Get dependencies from global ScraperModules object (injected by main script)
+const { BaseTool, ModalManager, generateOptimalSelector, isControlPanelElement } = window.ScraperModules || {};
 
-export class ScrollTool extends BaseTool {
+class ScrollTool extends BaseTool {
     constructor(stateManager, eventManager, statusManager) {
         super('scroll', stateManager, eventManager, statusManager);
         this.setupEventListeners();
@@ -173,4 +171,10 @@ export class ScrollTool extends BaseTool {
         this.stateManager.setState({ scrollConfig: null });
         this.statusManager.setSuccessStatus('Scroll configuration cleared');
     }
+}
+
+// Register in global namespace for browser injection
+if (typeof window !== 'undefined') {
+    window.ScraperModules = window.ScraperModules || {};
+    window.ScraperModules.ScrollTool = ScrollTool;
 }

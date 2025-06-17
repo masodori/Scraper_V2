@@ -94,6 +94,7 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
+
 test_fix*.py
 
 # Documentation Build

@@ -293,55 +293,6 @@ class ScraplingRunner:
         
         # Suppress known warnings from third-party libraries
         self._configure_logging()
-        
-        # Fix template configuration for sublink processing
-        self._fix_template_sublink_configuration()
-    
-    def _fix_template_sublink_configuration(self) -> None:
-        """Automatically fix template configuration when sublink actions are detected."""
-        try:
-            # Check if template has sublink actions
-            sublink_actions = [action for action in self.template.actions if 'sublink' in action.label.lower() or 'lawyer' in action.selector]
-            
-            if sublink_actions:
-                print("🔧 FIXING TEMPLATE SUBLINK CONFIGURATION")
-                print("="*45)
-                
-                # Enable subpage scraping if disabled
-                if not self.template.enable_subpage_scraping:
-                    self.template.enable_subpage_scraping = True
-                    print("✅ Enabled subpage scraping")
-                
-                # Set subpage URL pattern if not set
-                if not self.template.subpage_url_pattern:
-                    # Try to extract pattern from sublink actions
-                    for action in sublink_actions:
-                        if hasattr(action, 'target_url') and action.target_url:
-                            # Extract pattern from target URL
-                            if '/lawyer/' in action.target_url:
-                                base_url = action.target_url.split('/lawyer/')[0]
-                                self.template.subpage_url_pattern = f"{base_url}/lawyer/*"
-                                print(f"✅ Set subpage URL pattern: {self.template.subpage_url_pattern}")
-                                break
-                
-                # Ensure subpage containers are properly identified
-                subpage_containers = [elem for elem in self.template.elements if self._is_subpage_container(elem)]
-                if subpage_containers:
-                    print(f"✅ Found {len(subpage_containers)} subpage containers:")
-                    for container in subpage_containers:
-                        print(f"   📄 {container.label}: {len(container.sub_elements)} sub-elements")
-                        
-                        # Mark container for subpage extraction
-                        if not hasattr(container, 'follow_links'):
-                            container.follow_links = True
-                        if not hasattr(container, 'subpage_elements'):
-                            container.subpage_elements = container.sub_elements.copy()
-                
-                print("🎯 Template sublink configuration fixed!")
-                print("="*45)
-                
-        except Exception as e:
-            logger.warning(f"Error fixing template sublink configuration: {e}")
     
     def _configure_logging(self) -> None:
         """Configure logging to suppress known warnings from third-party libraries."""
@@ -401,14 +352,15 @@ class ScraplingRunner:
                 logger.info("Directory template detected - checking for infinite scroll content")
                 self._auto_scroll_to_load_all_content()
             
-            # Use new dual-browser smart pagination architecture
+            # Handle pagination FIRST to collect all containers across pages
+            # For directory templates, always attempt pagination even if not configured
             if (hasattr(self.template, 'pagination') and self.template.pagination) or self._looks_like_directory_template():
-                logger.info("Pagination detected or directory template - using smart dual-browser processing")
-                scraped_data = self._smart_pagination_with_dual_browser()
+                logger.info("Pagination detected or directory template - processing all pages/content")
+                scraped_data = self._handle_filters_and_pagination()
             else:
-                # Single page extraction with potential sublink processing
-                logger.info("No pagination - using dual-browser extraction")
-                scraped_data = self._smart_pagination_with_dual_browser()
+                # Single page extraction only
+                logger.info("No pagination - extracting current page only")
+                scraped_data = self._extract_data()
             
             # Execute any actions if specified (ONLY for non-navigation actions)
             if self.template.actions:
@@ -445,8 +397,8 @@ class ScraplingRunner:
             # Process containers with follow_links for subpage navigation
             scraped_data = self._process_container_subpages(scraped_data)
             
-            # Create unified output structure: main_container + subelements
-            scraped_data = self._create_unified_output_structure(scraped_data)
+            # Merge directory and subpage data into unified format
+            scraped_data = self._merge_directory_with_subpage_data(scraped_data)
             
             result.data = scraped_data
             result.success = True
@@ -606,31 +558,20 @@ class ScraplingRunner:
         Returns:
             True if container should extract data from subpages
         """
-        # Check container label
-        label_match = any(keyword in element_config.label.lower() 
-                         for keyword in ['subpage', 'sublink', 'subcon', 'education', 'credential', 'experience', 'bio', 'profile'])
+        subpage_indicators = [
+            # Container label suggests subpage data
+            any(keyword in element_config.label.lower() 
+                for keyword in ['subpage', 'sublink', 'subcon', 'education', 'credential', 'experience', 'bio', 'profile']),
+            # Sub-elements that are typically on individual pages
+            hasattr(element_config, 'sub_elements') and element_config.sub_elements and
+            any(keyword in sub.get('label', '').lower() if isinstance(sub, dict) else getattr(sub, 'label', '').lower()
+                for keyword in ['education', 'credential', 'admission', 'bar', 'experience', 'bio', 'creds']
+                for sub in element_config.sub_elements),
+            # Template has follow_links enabled for this container
+            getattr(element_config, 'follow_links', False)
+        ]
         
-        # Check sub-elements for subpage keywords
-        sub_elements_match = False
-        if hasattr(element_config, 'sub_elements') and element_config.sub_elements:
-            for sub in element_config.sub_elements:
-                sub_label = sub.get('label', '').lower() if isinstance(sub, dict) else getattr(sub, 'label', '').lower()
-                if any(keyword in sub_label for keyword in ['education', 'credential', 'admission', 'bar', 'experience', 'bio', 'creds']):
-                    sub_elements_match = True
-                    break
-        
-        # Check follow_links flag
-        follow_links_enabled = getattr(element_config, 'follow_links', False)
-        
-        subpage_indicators = [label_match, sub_elements_match, follow_links_enabled]
         is_subpage = any(subpage_indicators)
-        
-        print(f"🔍 Subpage check for '{element_config.label}':")
-        print(f"   Label match: {label_match}")
-        print(f"   Sub-elements match: {sub_elements_match}")
-        print(f"   Follow links: {follow_links_enabled}")
-        print(f"   Result: {'✅ SUBPAGE' if is_subpage else '❌ NOT SUBPAGE'}")
-        
         logger.debug(f"Subpage container check for '{element_config.label}': {is_subpage} (indicators: {subpage_indicators})")
         return is_subpage
     
@@ -899,101 +840,18 @@ class ScraplingRunner:
         return original_selector
     
     def _initialize_fetcher(self) -> None:
-        """Initialize the dual browser architecture with autodetect status reporting."""
+        """Initialize the appropriate Scrapling fetcher based on template settings."""
         try:
-            print("\n" + "="*60)
-            print("🔍 AUTODETECT COOKIE & PAGINATION STATUS")
-            print("="*60)
-            
-            # Report autodetect cookie status
-            self._report_autodetect_status()
-            
-            # Initialize dual browser engines
-            self._initialize_dual_browser_engines()
+            # Initialize PlayWrightFetcher with proper configuration
+            self.fetcher = PlayWrightFetcher
+            # Configure the fetcher class with the new API (headless is not a configure parameter)
+            PlayWrightFetcher.configure(auto_match=True)
+            # Create a single fetcher instance that will be reused for all page fetches
+            self.fetcher_instance = PlayWrightFetcher()
+            logger.info("Initialized PlayWrightFetcher instance for browser session reuse with AutoMatch enabled")
                 
         except Exception as e:
             logger.error(f"Failed to initialize fetcher: {e}")
-            raise
-    
-    def _report_autodetect_status(self) -> None:
-        """Report the status of autodetect cookies and pagination elements."""
-        # Check if template has autodetect cookies
-        if self.template.cookies:
-            print(f"✅ Found {len(self.template.cookies)} cookies in template")
-            for cookie in self.template.cookies[:3]:  # Show first 3
-                print(f"   🍪 {cookie.name}: {cookie.value[:20]}...")
-            if len(self.template.cookies) > 3:
-                print(f"   ... and {len(self.template.cookies) - 3} more cookies")
-        else:
-            print("❌ No autodetect cookies found in template")
-        
-        # Check for pagination configuration
-        if hasattr(self.template, 'pagination') and self.template.pagination:
-            print("✅ Pagination configuration found")
-        else:
-            print("⚠️  No pagination configuration - will use autodetect")
-        
-        # Check for sublink actions
-        sublink_actions = [action for action in self.template.actions if 'sublink' in action.label.lower() or 'lawyer' in action.selector]
-        if sublink_actions:
-            print(f"✅ Found {len(sublink_actions)} sublink action(s)")
-            for action in sublink_actions:
-                print(f"   🔗 {action.label}: {action.selector}")
-        else:
-            print("❌ No sublink actions found")
-        
-        # Check for subpage containers
-        subpage_containers = [elem for elem in self.template.elements if self._is_subpage_container(elem)]
-        if subpage_containers:
-            print(f"✅ Found {len(subpage_containers)} subpage container(s)")
-            for container in subpage_containers:
-                print(f"   📄 {container.label}: {len(container.sub_elements)} sub-elements")
-        else:
-            print("❌ No subpage containers detected")
-        
-        print("="*60)
-    
-    def _initialize_dual_browser_engines(self) -> None:
-        """Initialize the dual browser engine architecture."""
-        try:
-            print("🚀 Initializing Dual Browser Engine Architecture...")
-            
-            # Configure the fetcher class
-            PlayWrightFetcher.configure(auto_match=True)
-            
-            # Engine 1: Main directory page browser
-            self.main_engine = PlayWrightFetcher()
-            self.main_page = None
-            print("✅ Engine 1 (Main Directory): Initialized")
-            
-            # Engine 2: Sublink processing browser (if needed)
-            sublink_actions = [action for action in self.template.actions if 'sublink' in action.label.lower() or 'lawyer' in action.selector]
-            if sublink_actions or any(self._is_subpage_container(elem) for elem in self.template.elements):
-                self.sublink_engine = PlayWrightFetcher()
-                self.sublink_context = None  # Will be initialized on first use for true tab reuse
-                self.sublink_page = None  # Will be initialized on first use for tab reuse
-                self.sublink_queue = []
-                self.processed_sublinks = []
-                print("✅ Engine 2 (Sublink Processing): Initialized")
-                print(f"   📋 Sublink queue ready for async processing with tab reuse")
-            else:
-                self.sublink_engine = None
-                self.sublink_context = None
-                self.sublink_page = None
-                self.sublink_queue = []
-                self.processed_sublinks = []
-                print("⚠️  Engine 2 (Sublink Processing): Skipped (no sublinks detected)")
-            
-            # Legacy compatibility
-            self.fetcher = PlayWrightFetcher
-            self.fetcher_instance = self.main_engine
-            self.browser_pages = []
-            
-            print("🎯 Dual browser architecture ready!")
-            print("="*60)
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize dual browser engines: {e}")
             raise
     
     def _fetch_page(self, url: str) -> Optional[Adaptor]:
@@ -1106,177 +964,6 @@ class ScraplingRunner:
         # Post-process to merge related containers with subpage data
         merged_data = self._merge_related_containers(extracted_data)
         return merged_data
-    
-    def _extract_data_incremental(self, existing_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract only NEW data that was loaded after pagination, avoiding re-processing existing items.
-        
-        Args:
-            existing_data: Previously extracted data to determine what's already been processed
-            
-        Returns:
-            Dictionary containing only newly extracted data
-        """
-        extracted_data = {}
-        
-        # Track how many items were already processed for each element
-        existing_counts = {}
-        for key, value in existing_data.items():
-            if isinstance(value, list):
-                existing_counts[key] = len(value)
-            else:
-                existing_counts[key] = 0
-        
-        logger.debug(f"Incremental extraction - existing counts: {existing_counts}")
-        
-        for element in self.template.elements:
-            try:
-                logger.debug(f"Incremental extracting data for element: {element.label}")
-                
-                # Extract data incrementally based on element type
-                if self._is_subpage_container(element):
-                    # For subpage containers, use incremental extraction
-                    existing_count = existing_counts.get(element.label, 0)
-                    new_items = self._extract_subpage_container_data_incremental(element, existing_count)
-                    
-                    if new_items:
-                        extracted_data[element.label] = new_items
-                        logger.debug(f"Found {len(new_items)} new subpage items for {element.label}")
-                    else:
-                        logger.debug(f"No new subpage items found for {element.label}")
-                else:
-                    # For regular elements, extract all current data
-                    all_current_data = self._extract_element_data(element)
-                    
-                    if isinstance(all_current_data, list):
-                        # For list data, only return items beyond the existing count
-                        existing_count = existing_counts.get(element.label, 0)
-                        new_items = all_current_data[existing_count:] if len(all_current_data) > existing_count else []
-                        
-                        if new_items:
-                            extracted_data[element.label] = new_items
-                            logger.debug(f"Found {len(new_items)} new items for {element.label} (total: {len(all_current_data)}, existing: {existing_count})")
-                        else:
-                            logger.debug(f"No new items found for {element.label}")
-                    else:
-                        # For non-list data, only include if we haven't processed this element before
-                        if element.label not in existing_data:
-                            extracted_data[element.label] = all_current_data
-                        
-            except Exception as e:
-                logger.warning(f"Failed to incrementally extract {element.label}: {str(e)}")
-                # Don't fail the entire extraction for one element in incremental mode
-                continue
-        
-        return extracted_data
-    
-    def _extract_subpage_container_data_incremental(self, element_config: ElementSelector, existing_count: int) -> List[Dict[str, Any]]:
-        """
-        Extract subpage container data incrementally, processing only containers beyond the existing count.
-        
-        Args:
-            element_config: The element configuration for the subpage container
-            existing_count: Number of containers already processed
-            
-        Returns:
-            List of newly extracted container data
-        """
-        try:
-            # First, get all main containers
-            main_container_elements = self._get_main_container_elements_for_subpage()
-            
-            if not main_container_elements:
-                logger.warning("No main containers found for incremental subpage extraction")
-                return []
-            
-            total_containers = len(main_container_elements)
-            logger.debug(f"Incremental subpage extraction: found {total_containers} total containers, already processed {existing_count}")
-            
-            if existing_count >= total_containers:
-                logger.debug("All containers already processed - no new data")
-                return []
-            
-            # Process only NEW containers (starting from existing_count index)
-            new_containers = []
-            for i in range(existing_count, total_containers):
-                container = main_container_elements[i]
-                
-                try:
-                    # Find profile link in this container
-                    profile_link = None
-                    
-                    # Try to find any link within the container that points to a lawyer page
-                    lawyer_links = container.css("a[href*='/lawyer/']")
-                    if not lawyer_links:
-                        lawyer_links = container.css("a")  # Fallback to any link
-                    
-                    if lawyer_links:
-                        # Safe href extraction using multiple methods
-                        profile_link = ''
-                        element = lawyer_links[0]
-                        if hasattr(element, 'get_attribute'):
-                            profile_link = element.get_attribute('href') or ''
-                        elif hasattr(element, 'attrib'):
-                            profile_link = element.attrib.get('href', '')
-                        
-                        if profile_link and not profile_link.startswith('http'):
-                            profile_link = urljoin(self.template.url, profile_link)
-                    
-                    if not profile_link:
-                        logger.warning(f"No profile link found for container {i}")
-                        new_containers.append({'_container_index': i, '_error': 'No profile link found'})
-                        continue
-                    
-                    logger.debug(f"Found profile link for subpage container {i}: {profile_link}")
-                    
-                    # Extract subpage data from the individual lawyer page
-                    logger.info(f"Extracting subpage data from: {profile_link}")
-                    subpage_data = self._extract_subpage_container_data(profile_link, element_config)
-                    
-                    if subpage_data:
-                        subpage_data['_profile_link'] = profile_link
-                        subpage_data['_container_index'] = i
-                        new_containers.append(subpage_data)
-                        logger.debug(f"Successfully extracted subpage data for container {i}: {list(subpage_data.keys())}")
-                    else:
-                        logger.warning(f"Failed to extract subpage data for container {i}")
-                        new_containers.append({'_container_index': i, '_profile_link': profile_link, '_error': 'Extraction failed'})
-                        
-                except Exception as e:
-                    logger.warning(f"Error processing container {i}: {e}")
-                    new_containers.append({'_container_index': i, '_error': str(e)})
-            
-            logger.info(f"Successfully processed {len(new_containers)} new subpage containers")
-            return new_containers
-            
-        except Exception as e:
-            logger.error(f"Error in incremental subpage container extraction: {e}")
-            return []
-    
-    def _get_main_container_elements_for_subpage(self):
-        """Get main container elements for subpage extraction using directory detection patterns."""
-        try:
-            # Use the same patterns as the main extraction logic
-            directory_patterns = [
-                ".people.loading",
-                ".wp-grid-builder .wpgb-card",
-                ".people-list .wp-block-column",
-                "[class*='people']",
-                ".wpgb-grid-archivePeople > div"
-            ]
-            
-            for pattern in directory_patterns:
-                elements = self.current_page.css(pattern)
-                if elements:
-                    logger.debug(f"Found {len(elements)} directory containers with pattern: {pattern}")
-                    return elements
-            
-            logger.warning("No main container elements found using directory patterns")
-            return []
-            
-        except Exception as e:
-            logger.error(f"Error getting main container elements: {e}")
-            return []
     
     def _merge_related_containers(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -4373,8 +4060,8 @@ class ScraplingRunner:
                         self.current_page = updated_page
                         clicks_performed += 1
                         
-                        # Extract only NEW data that was loaded after the click
-                        new_page_data = self._extract_data_incremental(all_data)
+                        # Extract new data
+                        new_page_data = self._extract_data()
                         
                         if new_page_data:
                             # Check if we got new content
@@ -4387,9 +4074,11 @@ class ScraplingRunner:
                                     # Count new items
                                     initial_count = len(all_data[key])
                                     
-                                    # Add new items (these should already be new from incremental extraction)
-                                    all_data[key].extend(value)
-                                    new_content_found = True
+                                    # Add only new items (avoid duplicates)
+                                    for item in value:
+                                        if item not in all_data[key]:
+                                            all_data[key].append(item)
+                                            new_content_found = True
                                     
                                     new_count = len(all_data[key])
                                     logger.info(f"After click #{clicks_performed}: {key} has {new_count} items (added {new_count - initial_count})")
@@ -4583,455 +4272,6 @@ class ScraplingRunner:
         except Exception as e:
             logger.error(f"Error in WPGB infinite scroll pagination: {e}")
             return all_data or self._extract_data()
-
-    # ============================================================
-    # DUAL BROWSER & ASYNC SUBLINK PROCESSING METHODS
-    # ============================================================
-    
-    def _populate_sublink_queue(self) -> None:
-        """Populate the sublink queue by extracting profile links from main containers."""
-        try:
-            print("\n🔗 POPULATING SUBLINK QUEUE")
-            print("="*40)
-            
-            # Get main containers from the current page
-            main_container_elements = self._get_main_container_elements_for_subpage()
-            
-            if not main_container_elements:
-                print("❌ No main containers found for sublink extraction")
-                return
-            
-            print(f"📋 Found {len(main_container_elements)} main containers")
-            
-            # Extract profile links from each container
-            for i, container in enumerate(main_container_elements):
-                try:
-                    # Find profile link in this container
-                    lawyer_links = container.css("a[href*='/lawyer/']")
-                    if not lawyer_links:
-                        lawyer_links = container.css("a")  # Fallback to any link
-                    
-                    if lawyer_links:
-                        # Safe href extraction using multiple methods
-                        profile_link = ''
-                        element = lawyer_links[0]
-                        if hasattr(element, 'get_attribute'):
-                            profile_link = element.get_attribute('href') or ''
-                        elif hasattr(element, 'attrib'):
-                            profile_link = element.attrib.get('href', '')
-                        
-                        if profile_link and not profile_link.startswith('http'):
-                            profile_link = urljoin(self.template.url, profile_link)
-                        
-                        if profile_link and profile_link not in [item['url'] for item in self.sublink_queue]:
-                            self.sublink_queue.append({
-                                'url': profile_link,
-                                'container_index': i,
-                                'status': 'pending',
-                                'data': None,
-                                'error': None
-                            })
-                            
-                except Exception as e:
-                    logger.warning(f"Error extracting link from container {i}: {e}")
-            
-            print(f"✅ Populated queue with {len(self.sublink_queue)} sublinks")
-            for i, item in enumerate(self.sublink_queue[:5]):  # Show first 5
-                print(f"   {i+1}. {item['url']}")
-            if len(self.sublink_queue) > 5:
-                print(f"   ... and {len(self.sublink_queue) - 5} more")
-            print("="*40)
-            
-        except Exception as e:
-            logger.error(f"Error populating sublink queue: {e}")
-    
-    def _process_sublink_queue_async(self) -> Dict[str, Any]:
-        """Process sublinks asynchronously using the dedicated sublink browser engine."""
-        try:
-            if not self.sublink_engine or not self.sublink_queue:
-                logger.warning("No sublink engine or empty queue - skipping async processing")
-                return {}
-            
-            print(f"\n🚀 ASYNC SUBLINK PROCESSING ({len(self.sublink_queue)} items)")
-            print("="*50)
-            
-            # Get subpage containers that need data from sublinks
-            subpage_containers = [elem for elem in self.template.elements if self._is_subpage_container(elem)]
-            
-            if not subpage_containers:
-                print("❌ No subpage containers found - skipping sublink processing")
-                return {}
-            
-            all_subpage_data = {}
-            
-            # Initialize progress tracking
-            total_sublinks = len(self.sublink_queue)
-            processed_count = 0
-            
-            # Process each sublink one by one (async simulation)
-            for queue_item in self.sublink_queue:
-                try:
-                    processed_count += 1
-                    print(f"🔄 Processing ({processed_count}/{total_sublinks}): {queue_item['url']}")
-                    
-                    # Extract subpage data using the dedicated sublink engine
-                    subpage_data = self._extract_subpage_data_with_engine(queue_item['url'], subpage_containers)
-                    
-                    if subpage_data:
-                        # Store the extracted data
-                        for container_label, data in subpage_data.items():
-                            if container_label not in all_subpage_data:
-                                all_subpage_data[container_label] = []
-                            
-                            # Add container index and profile link to the data
-                            if isinstance(data, list):
-                                for item in data:
-                                    if isinstance(item, dict):
-                                        item['_profile_link'] = queue_item['url']
-                                        item['_container_index'] = queue_item['container_index']
-                                all_subpage_data[container_label].extend(data)
-                            elif isinstance(data, dict):
-                                data['_profile_link'] = queue_item['url']
-                                data['_container_index'] = queue_item['container_index']
-                                all_subpage_data[container_label].append(data)
-                        
-                        queue_item['status'] = 'completed'
-                        queue_item['data'] = subpage_data
-                        self.processed_sublinks.append(queue_item)
-                        
-                        print(f"✅ Completed: {len(subpage_data)} containers extracted")
-                    else:
-                        queue_item['status'] = 'failed'
-                        queue_item['error'] = 'No data extracted'
-                        print(f"❌ Failed: No data extracted")
-                    
-                    # Small delay between requests to avoid overwhelming the server
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    queue_item['status'] = 'error'
-                    queue_item['error'] = str(e)
-                    logger.warning(f"Error processing sublink {queue_item['url']}: {e}")
-                    print(f"❌ Error: {str(e)}")
-            
-            print(f"🎯 Async processing complete: {len(self.processed_sublinks)}/{total_sublinks} successful")
-            print("="*50)
-            
-            return all_subpage_data
-            
-        except Exception as e:
-            logger.error(f"Error in async sublink processing: {e}")
-            return {}
-    
-    def _extract_subpage_data_with_engine(self, url: str, subpage_containers: List) -> Dict[str, Any]:
-        """Extract subpage data using the dedicated sublink engine with proper tab reuse."""
-        try:
-            # Initialize the persistent browser context and page if not already done
-            if not hasattr(self, 'sublink_context') or self.sublink_context is None:
-                print("🌐 Initializing Engine 2 browser context for tab reuse...")
-                
-                # Get the browser instance from the sublink engine
-                browser = self.sublink_engine.get_browser()
-                
-                # Create a new context with cookies
-                context_options = {
-                    'viewport': {'width': 1920, 'height': 1080}
-                }
-                
-                # Add cookies to context if they exist
-                if self.template.cookies:
-                    formatted_cookies = [{
-                        'name': cookie.name,
-                        'value': cookie.value,
-                        'domain': cookie.domain,
-                        'path': cookie.path,
-                        'secure': getattr(cookie, 'secure', False),
-                        'httpOnly': getattr(cookie, 'httpOnly', False)
-                    } for cookie in self.template.cookies]
-                    context_options['storage_state'] = {'cookies': formatted_cookies}
-                    print(f"🍪 Setting up {len(self.template.cookies)} cookies in browser context")
-                
-                self.sublink_context = browser.new_context(**context_options)
-                self.sublink_page = self.sublink_context.new_page()
-                
-                print("✅ Engine 2 context and page initialized for true tab reuse")
-                
-                # Navigate to the first URL
-                print(f"🔄 Engine 2 navigating to initial URL: {url}")
-                self.sublink_page.goto(url, wait_until='networkidle', timeout=self.template.wait_timeout * 1000)
-                print("✅ Initial navigation completed")
-                
-            else:
-                # Reuse existing page - navigate to new URL
-                print(f"🔄 Engine 2 reusing existing tab to navigate to: {url}")
-                self.sublink_page.goto(url, wait_until='networkidle', timeout=self.template.wait_timeout * 1000)
-                print("✅ Tab reuse navigation completed")
-            
-            if not self.sublink_page or self.sublink_page.status != 200:
-                logger.warning(f"Failed to fetch subpage: {url}")
-                return {}
-            
-            # Store original page and switch to subpage temporarily
-            original_page = self.current_page
-            self.current_page = self.sublink_page
-            
-            subpage_data = {}
-            
-            # Extract data for each subpage container
-            for container in subpage_containers:
-                try:
-                    container_data = self._extract_element_data(container)
-                    if container_data:
-                        subpage_data[container.label] = container_data
-                except Exception as e:
-                    logger.warning(f"Error extracting {container.label} from subpage: {e}")
-            
-            # Restore original page
-            self.current_page = original_page
-            
-            return subpage_data
-            
-        except Exception as e:
-            logger.error(f"Error extracting subpage data from {url}: {e}")
-            return {}
-    
-    def _detect_pagination_location(self) -> str:
-        """Detect whether pagination should occur on main page or subpage."""
-        try:
-            # Check if there are sublink actions in the template
-            sublink_actions = [action for action in self.template.actions if 'sublink' in action.label.lower()]
-            
-            if sublink_actions:
-                # If we have sublink actions, pagination likely happens on subpages
-                print("🎯 Pagination Location: SUBPAGE (sublink actions detected)")
-                return "subpage"
-            
-            # Check for load more button on current page
-            load_more_selectors = [".wpgb-load-more", ".load-more", "[class*='load-more']", "[id*='load-more']"]
-            
-            for selector in load_more_selectors:
-                elements = self.current_page.css(selector)
-                if elements:
-                    print(f"🎯 Pagination Location: MAIN PAGE (found {selector})")
-                    return "main_page"
-            
-            # Default to main page if uncertain
-            print("🎯 Pagination Location: MAIN PAGE (default)")
-            return "main_page"
-            
-        except Exception as e:
-            logger.warning(f"Error detecting pagination location: {e}")
-            return "main_page"
-    
-    def _smart_pagination_with_dual_browser(self) -> Dict[str, Any]:
-        """Smart pagination handling with dual browser architecture."""
-        try:
-            print("\n🧠 SMART PAGINATION WITH DUAL BROWSER")
-            print("="*45)
-            
-            # Detect where pagination should occur
-            pagination_location = self._detect_pagination_location()
-            
-            # Initialize data collection
-            all_data = {}
-            
-            if pagination_location == "main_page":
-                # Handle main page pagination with Engine 1
-                print("📄 Processing main page pagination...")
-                
-                # First, get initial data from main page
-                initial_data = self._extract_data()
-                if initial_data:
-                    all_data.update(initial_data)
-                    print(f"📊 Initial data: {sum(len(v) if isinstance(v, list) else 1 for v in initial_data.values())} items")
-                
-                # Populate sublink queue for async processing
-                self._populate_sublink_queue()
-                
-                # Process sublinks asynchronously with Engine 2
-                subpage_data = self._process_sublink_queue_async()
-                if subpage_data:
-                    all_data.update(subpage_data)
-                
-                # Continue main page pagination
-                try:
-                    paginated_data = self._try_scroll_based_pagination()
-                    if paginated_data:
-                        # Merge paginated data
-                        for key, value in paginated_data.items():
-                            if key in all_data and isinstance(all_data[key], list) and isinstance(value, list):
-                                all_data[key].extend(value)
-                            else:
-                                all_data[key] = value
-                except Exception as e:
-                    logger.warning(f"Main page pagination failed: {e}")
-                
-            elif pagination_location == "subpage":
-                # Handle subpage pagination with Engine 2
-                print("📑 Processing subpage pagination...")
-                
-                # Extract ONLY main page containers (NOT subpage elements)
-                main_page_data = self._extract_main_page_only()
-                if main_page_data:
-                    all_data.update(main_page_data)
-                    print(f"📊 Main page data: {sum(len(v) if isinstance(v, list) else 1 for v in main_page_data.values())} items")
-                
-                # Populate sublink queue for async processing with Engine 2
-                self._populate_sublink_queue()
-                
-                # Process sublinks asynchronously with Engine 2
-                subpage_data = self._process_sublink_queue_async()
-                if subpage_data:
-                    all_data.update(subpage_data)
-                    print(f"📊 Subpage data: {sum(len(v) if isinstance(v, list) else 1 for v in subpage_data.values())} items")
-                
-            print("🎯 Smart pagination complete!")
-            print("="*45)
-            
-            return all_data
-            
-        except Exception as e:
-            logger.error(f"Error in smart pagination: {e}")
-            return self._extract_data()  # Fallback to basic extraction
-    
-    def _extract_main_page_only(self) -> Dict[str, Any]:
-        """Extract only main page elements (exclude subpage containers)."""
-        try:
-            print("\n📄 EXTRACTING MAIN PAGE ELEMENTS ONLY")
-            print("="*40)
-            
-            extracted_data = {}
-            
-            # Filter out subpage containers
-            main_page_elements = [elem for elem in self.template.elements if not self._is_subpage_container(elem)]
-            
-            if not main_page_elements:
-                print("❌ No main page elements found")
-                return {}
-            
-            print(f"✅ Found {len(main_page_elements)} main page elements:")
-            for elem in main_page_elements:
-                print(f"   📄 {elem.label}")
-            
-            # Extract each main page element
-            for element in main_page_elements:
-                try:
-                    print(f"🔄 Extracting: {element.label}")
-                    value = self._extract_element_data(element)
-                    extracted_data[element.label] = value
-                    print(f"✅ Extracted {element.label}: {len(value) if isinstance(value, list) else 1} items")
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to extract main page element {element.label}: {e}")
-                    print(f"❌ Failed: {element.label}")
-            
-            print("="*40)
-            return extracted_data
-            
-        except Exception as e:
-            logger.error(f"Error extracting main page elements: {e}")
-            return {}
-    
-    def _create_unified_output_structure(self, scraped_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create unified output structure: main_container with name, position, sector, email, phone, profile link + subelements."""
-        try:
-            print("\n📊 CREATING UNIFIED OUTPUT STRUCTURE")
-            print("="*40)
-            
-            unified_data = {}
-            
-            # Find main container data
-            main_container_data = None
-            main_container_key = None
-            
-            # Look for main container in the scraped data
-            for key, data in scraped_data.items():
-                if 'main' in key.lower() and 'container' in key.lower() and isinstance(data, list):
-                    main_container_data = data
-                    main_container_key = key
-                    break
-            
-            if not main_container_data:
-                print("❌ No main container data found - using original structure")
-                return scraped_data
-            
-            print(f"✅ Found main container: {main_container_key} with {len(main_container_data)} items")
-            
-            # Find subpage/subelement data
-            subpage_data = {}
-            for key, data in scraped_data.items():
-                if key != main_container_key and isinstance(data, list):
-                    # This is likely subpage or subelement data
-                    subpage_data[key] = data
-                    print(f"📄 Found subelement data: {key} with {len(data)} items")
-            
-            # Create unified structure
-            unified_containers = []
-            
-            for i, main_item in enumerate(main_container_data):
-                if not isinstance(main_item, dict):
-                    continue
-                
-                # Start with main container data
-                unified_item = {
-                    # Core profile data
-                    'name': main_item.get('name', ''),
-                    'position': main_item.get('position', ''),
-                    'sector': main_item.get('sector', ''),
-                    'email': main_item.get('email', ''),
-                    'phone': main_item.get('phone', ''),
-                    'profile_link': main_item.get('_profile_link', ''),
-                }
-                
-                # Add any other main container fields
-                for key, value in main_item.items():
-                    if key not in unified_item and not key.startswith('_'):
-                        unified_item[key] = value
-                
-                # Find and merge corresponding subpage data by container index
-                container_index = main_item.get('_container_index', i)
-                
-                for sub_key, sub_data_list in subpage_data.items():
-                    # Find matching subpage data by container index
-                    matching_subpage_items = [
-                        item for item in sub_data_list 
-                        if isinstance(item, dict) and item.get('_container_index') == container_index
-                    ]
-                    
-                    if matching_subpage_items:
-                        # Merge subpage data
-                        subpage_item = matching_subpage_items[0]  # Take first match
-                        
-                        # Add subelement data
-                        for sub_field, sub_value in subpage_item.items():
-                            if not sub_field.startswith('_'):
-                                unified_item[sub_field] = sub_value
-                        
-                        print(f"🔗 Merged {sub_key} data for container {container_index}")
-                
-                unified_containers.append(unified_item)
-            
-            # Create the final unified structure
-            unified_data['profiles'] = unified_containers
-            
-            # Add metadata
-            unified_data['metadata'] = {
-                'total_profiles': len(unified_containers),
-                'source_url': scraped_data.get('url', ''),
-                'extraction_method': 'dual_browser_unified',
-                'main_container_source': main_container_key,
-                'subpage_sources': list(subpage_data.keys())
-            }
-            
-            print(f"🎯 Created unified structure with {len(unified_containers)} profiles")
-            print("="*40)
-            
-            return unified_data
-            
-        except Exception as e:
-            logger.error(f"Error creating unified output structure: {e}")
-            print(f"❌ Error in unification: {e}")
-            return scraped_data  # Return original data if unification fails
 
     def export_data(self, result: ScrapingResult, output_file: str, format: str = "json") -> None:
         """

@@ -20,7 +20,7 @@ from colorama import init, Fore, Style
 
 # Import our custom modules
 from ..models.scraping_template import ScrapingTemplate, CookieData, ElementSelector, NavigationAction
-from .scrapling_runner import ScraplingRunner
+from .scrapling_runner_refactored import ScraplingRunner
 
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)
