@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from src.core.scrapling_runner import ScraplingRunner
+from src.core.scrapling_runner_refactored import ScraplingRunner
 from src.models.scraping_template import ScrapingTemplate
 
 def demonstrate_enhanced_scraping():

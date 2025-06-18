@@ -9,7 +9,7 @@ import tempfile
 import json
 from pathlib import Path
 
-from src.core.scrapling_runner import ScraplingRunner, BatchScraplingRunner
+from src.core.scrapling_runner_refactored import ScraplingRunner
 from src.models.scraping_template import (
     ScrapingTemplate, 
     ElementSelector, 
