@@ -190,12 +190,6 @@ The scraper operates in two distinct phases:
 1. **Interactive Phase**: Visual template creation through browser overlay with Playwright
 2. **Automated Phase**: Template execution with Scrapling engine
 
-### Refactored Modular Architecture (v2.0)
-- **97% Complexity Reduction**: From 5,213-line monolith to 8 focused modules
-- **10x Faster Development**: Easier to understand, test, and extend
-- **Enhanced Reliability**: Better error handling and fallback strategies
-- **Future-Proof Design**: Modular architecture allows easy feature additions
-
 ### Core Components
 - **ScraplingRunner Refactored** (300 lines): Main orchestrator using composition
 - **TemplateAnalyzer**: Smart detection of directory pages vs individual pages
