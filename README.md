@@ -29,12 +29,12 @@ A powerful web scraping tool that combines visual element selection with automat
 <table>
   <thead>
     <tr>
-      <th>Unix / Mac</th>
-      <th>Windows</th>
+      <th width="50%">Unix&nbsp;/&nbsp;Mac</th>
+      <th width="50%">Windows</th>
     </tr>
   </thead>
   <tbody>
-    <tr>
+    <tr valign="top">
       <td>
         <pre><code class="language-bash">git clone https://github.com/masodori/Scraper_V2.git
 cd Scraper_V2
