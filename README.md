@@ -25,8 +25,7 @@ A powerful web scraping tool that combines visual element selection with automat
 ## 🚀 Quick Start
 
 ### Installation
-
-1. **Clone and setup**:
+**Clone and setup**:
 <table>
   <thead>
     <tr>
