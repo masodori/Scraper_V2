@@ -27,14 +27,34 @@ A powerful web scraping tool that combines visual element selection with automat
 ### Installation
 
 1. **Clone and setup**:
-   ```bash
-   git clone <repository-url>
-   cd Scraper_V2
-   python -m venv venv
-   source venv/bin/activate  # Windows: venv\Scripts\activate
-   pip install -r requirements.txt
-   playwright install chromium
-   ```
+<table>
+  <thead>
+    <tr>
+      <th>Unix / Mac</th>
+      <th>Windows</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <pre><code class="language-bash">git clone https://github.com/masodori/Scraper_V2.git
+cd Scraper_V2
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium</code></pre>
+      </td>
+      <td>
+        <pre><code class="language-bash">git clone https://github.com/masodori/Scraper_V2.git
+cd Scraper_V2
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium</code></pre>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ## 📋 Core Commands
 
