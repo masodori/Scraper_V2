@@ -1,8 +1,6 @@
-# 🕷️ Interactive Web Scraper v2.0 - Refactored Edition
+# 🕷️ Interactive Web Scraper v2.0
 
 A powerful web scraping tool that combines visual element selection with automated data extraction. Create scraping templates by clicking on elements in a real browser, then execute them programmatically.
-
-> **✨ NEW: Refactored Architecture** - This version features a completely redesigned, modular architecture with 97% reduction in complexity, infinite improvement in maintainability, and enhanced performance.
 
 ## 🌟 Key Features
 
